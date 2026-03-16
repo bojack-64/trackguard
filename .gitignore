@@ -10,10 +10,15 @@ dist/
 # Database
 data/*.db
 data/*.db-journal
+data/*.db-shm
+data/*.db-wal
 
 # Screenshots from crawls
 public/screenshots/*.png
 public/screenshots/*.jpg
+
+# Test reports (generated HTML)
+test-reports/
 
 # OS files
 .DS_Store
@@ -22,3 +27,6 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Claude Code
+.claude/

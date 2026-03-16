@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audit <%= audit.reference_id %> — TrackGuard Admin</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <% if (audit.status === 'crawling' || audit.status === 'analysing') { %>
+    <meta http-equiv="refresh" content="10">
+  <% } %>
+</head>
+<body>
+  <header class="site-header site-header--admin">
+    <div class="container">
+      <a href="/admin" class="logo">Track<span>Guard</span> <small>Admin</small></a>
+    </div>
+  </header>
+
+  <main>
+    <div class="container admin-page">
+      <p><a href="/admin">&larr; Back to Dashboard</a></p>
+
+      <div class="detail-header">
+        <h1><%= audit.reference_id %></h1>
+        <span class="status-badge status-<%= audit.status %>"><%= audit.status %></span>
+      </div>
+
+      <!-- Submission details -->
+      <section class="detail-section">
+        <h2>Submission Details</h2>
+        <dl class="detail-grid">
+          <dt>Website</dt>
+          <dd><a href="<%= audit.website_url %>" target="_blank"><%= audit.website_url %></a></dd>
+          <dt>Company</dt>
+          <dd><%= audit.company_name %></dd>
+          <dt>Contact</dt>
+          <dd><%= audit.contact_email %></dd>
+          <dt>Platform</dt>
+          <dd><%= audit.platform %></dd>
+          <dt>CMP</dt>
+          <dd><%= audit.cmp %></dd>
+          <dt>Conversion Events</dt>
+          <dd><%= audit.conversion_events || '—' %></dd>
+          <dt>Recent Changes</dt>
+          <dd><%= audit.recent_changes || '—' %></dd>
+          <dt>Submitted</dt>
+          <dd><%= audit.created_at %></dd>
+        </dl>
+      </section>
+
+      <!-- Status & Actions -->
+      <section class="detail-section">
+        <h2>Actions</h2>
+
+        <% if (audit.status === 'crawling') { %>
+          <div class="status-message status-message--info">
+            <span class="spinner"></span>
+            <strong>Crawl in progress...</strong> The site is being crawled. This typically takes 1–3 minutes. Refresh this page to check progress.
+          </div>
+        <% } else if (audit.status === 'analysing') { %>
+          <div class="status-message status-message--info">
+            <span class="spinner"></span>
+            <strong>Generating report...</strong> The AI is analysing crawl data and building your report. This typically takes 30–60 seconds. Refresh to check.
+          </div>
+        <% } else if (audit.status === 'error') { %>
+          <div class="status-message status-message--error">
+            <strong>Something went wrong.</strong> The crawl or report generation failed. You can retry below. If the problem persists, check the server logs.
+          </div>
+        <% } %>
+
+        <div class="action-buttons">
+          <% if (audit.status === 'pending' || audit.status === 'error') { %>
+            <form action="/admin/audit/<%= audit.id %>/crawl" method="POST" style="display:inline">
+              <button type="submit" class="btn btn-primary"><%= audit.status === 'error' ? 'Retry Crawl' : 'Start Crawl' %></button>
+            </form>
+          <% } %>
+          <% if (audit.status === 'crawl_complete') { %>
+            <form action="/admin/audit/<%= audit.id %>/generate-report" method="POST" style="display:inline">
+              <button type="submit" class="btn btn-primary">Generate Report</button>
+            </form>
+          <% } %>
+          <% if (audit.status === 'report_ready') { %>
+            <a href="/report/<%= audit.reference_id %>" class="btn btn-primary" target="_blank">View Report</a>
+            <form action="/admin/audit/<%= audit.id %>/crawl" method="POST" style="display:inline; margin-left: 8px;">
+              <button type="submit" class="btn btn-secondary">Re-run Audit</button>
+            </form>
+          <% } %>
+        </div>
+      </section>
+
+      <!-- Crawl results -->
+      <% if (crawlPages && crawlPages.length > 0) { %>
+        <section class="detail-section">
+          <h2>Crawl Results (<%= crawlPages.length %> pages)</h2>
+          <% crawlPages.forEach(function(page) { %>
+            <div class="crawl-page-card">
+              <h3><%= page.page_type || 'unknown' %> — <small><%= page.page_url %></small></h3>
+              <p class="text-muted">Load time: <%= page.page_load_ms ? page.page_load_ms + 'ms' : '—' %> | Crawled: <%= page.crawled_at %></p>
+
+              <% if (page.screenshot_path) { %>
+                <img src="/<%= page.screenshot_path %>" alt="Screenshot of <%= page.page_url %>" class="crawl-screenshot">
+              <% } %>
+
+              <details>
+                <summary>Raw Data</summary>
+                <div class="raw-data">
+                  <h4>DataLayer Events</h4>
+                  <pre><%= page.datalayer_events || 'None captured' %></pre>
+                  <h4>GA4 Requests</h4>
+                  <pre><%= page.ga4_requests || 'None captured' %></pre>
+                  <h4>GTM Requests</h4>
+                  <pre><%= page.gtm_requests || 'None captured' %></pre>
+                  <h4>Consent State</h4>
+                  <pre><%= page.consent_state || 'None captured' %></pre>
+                  <h4>Console Errors</h4>
+                  <pre><%= page.console_errors || 'None captured' %></pre>
+                </div>
+              </details>
+            </div>
+          <% }); %>
+        </section>
+      <% } %>
+
+      <!-- Report -->
+      <% if (report && report.ai_analysis) { %>
+        <section class="detail-section">
+          <h2>AI Analysis (Raw)</h2>
+          <details>
+            <summary>View raw AI response</summary>
+            <pre class="raw-data"><%= report.ai_analysis %></pre>
+          </details>
+        </section>
+      <% } %>
+    </div>
+  </main>
+</body>
+</html>

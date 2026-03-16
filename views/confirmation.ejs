@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audit Submitted — TrackGuard</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <a href="/" class="logo">Track<span>Guard</span></a>
+    </div>
+  </header>
+
+  <main>
+    <div class="container confirmation-page">
+      <div class="confirmation-card">
+        <div class="confirmation-icon">&#10003;</div>
+        <h1>Audit Request Submitted</h1>
+        <p class="ref-id">Reference: <strong><%= audit.reference_id %></strong></p>
+        <p>We've received your request to audit <strong><%= audit.website_url %></strong>.</p>
+        <p>We'll review the submission and run the tracking audit shortly. Keep your reference ID for your records.</p>
+
+        <div class="confirmation-details">
+          <h3>Submission Summary</h3>
+          <dl>
+            <dt>Website</dt>
+            <dd><%= audit.website_url %></dd>
+            <dt>Platform</dt>
+            <dd><%= audit.platform %></dd>
+            <dt>Company</dt>
+            <dd><%= audit.company_name %></dd>
+            <dt>Contact</dt>
+            <dd><%= audit.contact_email %></dd>
+          </dl>
+        </div>
+
+        <a href="/" class="btn btn-secondary">Submit Another Audit</a>
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>&copy; <%= new Date().getFullYear() %> TrackGuard</p>
+    </div>
+  </footer>
+</body>
+</html>

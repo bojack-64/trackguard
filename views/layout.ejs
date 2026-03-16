@@ -7,6 +7,20 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <%- body %>
+  <header class="site-header">
+    <div class="container">
+      <a href="/" class="logo">Track<span>Guard</span></a>
+    </div>
+  </header>
+
+  <main>
+    <%- body %>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>&copy; <%= new Date().getFullYear() %> TrackGuard</p>
+    </div>
+  </footer>
 </body>
 </html>

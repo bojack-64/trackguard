@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Get a Tracking Health Audit — TrackGuard</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <a href="/" class="logo">Track<span>Guard</span></a>
+    </div>
+  </header>
+
+  <main>
+    <div class="container intake-page">
+      <div class="intake-header">
+        <h1>Get a Tracking Health Audit</h1>
+        <p class="subtitle">We inspect your website's analytics, consent, and conversion tracking — and tell you exactly what's broken, what it's costing you, and how to fix it.</p>
+      </div>
+
+      <% if (errors && errors.length > 0) { %>
+        <div class="error-box">
+          <% errors.forEach(function(err) { %>
+            <p><%= err %></p>
+          <% }); %>
+        </div>
+      <% } %>
+
+      <form action="/audit" method="POST" class="intake-form" novalidate>
+        <div class="form-group">
+          <label for="website_url">Website URL <span class="required">*</span></label>
+          <input type="url" id="website_url" name="website_url" placeholder="https://www.example.com" required value="<%= formData ? formData.website_url || '' : '' %>">
+        </div>
+
+        <div class="form-group">
+          <label for="platform">Site Platform</label>
+          <select id="platform" name="platform">
+            <option value="shopify" <%= formData && formData.platform === 'shopify' ? 'selected' : '' %>>Shopify</option>
+            <option value="wordpress" <%= formData && formData.platform === 'wordpress' ? 'selected' : '' %>>WordPress</option>
+            <option value="webflow" <%= formData && formData.platform === 'webflow' ? 'selected' : '' %>>Webflow</option>
+            <option value="wix" <%= formData && formData.platform === 'wix' ? 'selected' : '' %>>Wix</option>
+            <option value="other" <%= !formData || formData.platform === 'other' ? 'selected' : '' %>>Custom / Other</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="conversion_events">Primary Conversion Events</label>
+          <input type="text" id="conversion_events" name="conversion_events" placeholder="e.g. purchase, lead form submission, add to cart" value="<%= formData ? formData.conversion_events || '' : '' %>">
+        </div>
+
+        <div class="form-group">
+          <label for="cmp">Consent Management Platform</label>
+          <select id="cmp" name="cmp">
+            <option value="cookiebot" <%= formData && formData.cmp === 'cookiebot' ? 'selected' : '' %>>Cookiebot</option>
+            <option value="onetrust" <%= formData && formData.cmp === 'onetrust' ? 'selected' : '' %>>OneTrust</option>
+            <option value="cookieyes" <%= formData && formData.cmp === 'cookieyes' ? 'selected' : '' %>>CookieYes</option>
+            <option value="termly" <%= formData && formData.cmp === 'termly' ? 'selected' : '' %>>Termly</option>
+            <option value="unknown" <%= !formData || formData.cmp === 'unknown' ? 'selected' : '' %>>None / Unknown</option>
+            <option value="other" <%= formData && formData.cmp === 'other' ? 'selected' : '' %>>Other</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="recent_changes">Recent Site Changes <span class="optional">(optional)</span></label>
+          <textarea id="recent_changes" name="recent_changes" rows="3" placeholder="e.g. redesigned checkout last week, migrated to new theme"><%= formData ? formData.recent_changes || '' : '' %></textarea>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="contact_email">Contact Email <span class="required">*</span></label>
+            <input type="email" id="contact_email" name="contact_email" placeholder="you@company.com" required value="<%= formData ? formData.contact_email || '' : '' %>">
+          </div>
+
+          <div class="form-group">
+            <label for="company_name">Company / Agency Name <span class="required">*</span></label>
+            <input type="text" id="company_name" name="company_name" placeholder="Acme Agency" required value="<%= formData ? formData.company_name || '' : '' %>">
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Request Audit</button>
+      </form>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>&copy; <%= new Date().getFullYear() %> TrackGuard</p>
+    </div>
+  </footer>
+</body>
+</html>

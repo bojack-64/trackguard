@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Dashboard — TrackGuard</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <header class="site-header site-header--admin">
+    <div class="container">
+      <a href="/admin" class="logo">Track<span>Guard</span> <small>Admin</small></a>
+    </div>
+  </header>
+
+  <main>
+    <div class="container admin-page">
+      <h1>Dashboard</h1>
+
+      <!-- Stats bar -->
+      <div class="stats-bar">
+        <div class="stat-card">
+          <div class="stat-number"><%= stats.total %></div>
+          <div class="stat-label">Total Audits</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-number"><%= stats.thisMonth %></div>
+          <div class="stat-label">This Month</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-number"><%= stats.avgScore !== null ? stats.avgScore : '—' %></div>
+          <div class="stat-label">Avg Health Score</div>
+        </div>
+      </div>
+
+      <!-- Audits table -->
+      <% if (audits.length === 0) { %>
+        <p class="empty-state">No audit submissions yet. Share the <a href="/">intake form</a> to get started.</p>
+      <% } else { %>
+        <table class="audits-table">
+          <thead>
+            <tr>
+              <th>Reference</th>
+              <th>Company</th>
+              <th>Website</th>
+              <th>Status</th>
+              <th>Submitted</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% audits.forEach(function(audit) { %>
+              <tr>
+                <td><a href="/admin/audit/<%= audit.id %>"><%= audit.reference_id %></a></td>
+                <td><%= audit.company_name %></td>
+                <td class="url-cell"><%= audit.website_url %></td>
+                <td><span class="status-badge status-<%= audit.status %>"><%= audit.status %></span></td>
+                <td><%= new Date(audit.created_at + 'Z').toLocaleDateString() %></td>
+                <td>
+                  <% if (audit.status === 'pending') { %>
+                    <form action="/admin/audit/<%= audit.id %>/crawl" method="POST" style="display:inline">
+                      <button type="submit" class="btn btn-small">Start Crawl</button>
+                    </form>
+                  <% } else if (audit.status === 'crawling') { %>
+                    <span class="text-muted"><span class="spinner" style="width:14px;height:14px;border-width:2px;vertical-align:middle;margin-right:4px;"></span> Crawling...</span>
+                  <% } else if (audit.status === 'analysing') { %>
+                    <span class="text-muted"><span class="spinner" style="width:14px;height:14px;border-width:2px;vertical-align:middle;margin-right:4px;"></span> Analysing...</span>
+                  <% } else if (audit.status === 'crawl_complete') { %>
+                    <form action="/admin/audit/<%= audit.id %>/generate-report" method="POST" style="display:inline">
+                      <button type="submit" class="btn btn-small">Generate Report</button>
+                    </form>
+                  <% } else if (audit.status === 'report_ready') { %>
+                    <a href="/report/<%= audit.reference_id %>" class="btn btn-small" target="_blank">View Report</a>
+                  <% } else if (audit.status === 'error') { %>
+                    <form action="/admin/audit/<%= audit.id %>/crawl" method="POST" style="display:inline">
+                      <button type="submit" class="btn btn-small btn-danger">Retry</button>
+                    </form>
+                  <% } %>
+                </td>
+              </tr>
+            <% }); %>
+          </tbody>
+        </table>
+      <% } %>
+    </div>
+  </main>
+</body>
+</html>

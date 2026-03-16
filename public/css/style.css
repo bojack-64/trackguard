@@ -1,7 +1,8 @@
 /* TrackGuard — Styles
-   Navy: #1B2A4A
-   Teal: #2E8B8B
-   See build prompt for design direction. */
+   Navy: #1B2A4A    Teal: #2E8B8B
+   Clean, professional, credible. */
+
+/* ─── Reset & Base ────────────────────────────────────────────────────────── */
 
 *, *::before, *::after {
   box-sizing: border-box;
@@ -13,4 +14,586 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: #333;
   line-height: 1.6;
+  background: #f8f9fa;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+main {
+  flex: 1;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+a {
+  color: #2E8B8B;
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* ─── Header ──────────────────────────────────────────────────────────────── */
+
+.site-header {
+  background: #1B2A4A;
+  padding: 16px 0;
+}
+
+.site-header .container {
+  display: flex;
+  align-items: center;
+}
+
+.logo {
+  color: #fff;
+  font-size: 1.4rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+.logo span {
+  color: #2E8B8B;
+}
+.logo small {
+  font-size: 0.7rem;
+  font-weight: 400;
+  opacity: 0.7;
+  margin-left: 8px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.logo:hover {
+  text-decoration: none;
+}
+
+/* ─── Footer ──────────────────────────────────────────────────────────────── */
+
+.site-footer {
+  text-align: center;
+  padding: 24px 0;
+  color: #999;
+  font-size: 0.85rem;
+  margin-top: 40px;
+}
+
+/* ─── Buttons ─────────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-block;
+  padding: 10px 24px;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  text-decoration: none;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-primary {
+  background: #2E8B8B;
+  color: #fff;
+}
+.btn-primary:hover {
+  background: #257373;
+  text-decoration: none;
+}
+
+.btn-secondary {
+  background: #e9ecef;
+  color: #1B2A4A;
+}
+.btn-secondary:hover {
+  background: #dee2e6;
+  text-decoration: none;
+}
+
+.btn-small {
+  padding: 5px 14px;
+  font-size: 0.8rem;
+}
+
+.btn-danger {
+  background: #dc3545;
+  color: #fff;
+}
+.btn-danger:hover {
+  background: #c82333;
+}
+
+/* ─── Intake Form ─────────────────────────────────────────────────────────── */
+
+.intake-page {
+  max-width: 640px;
+  padding-top: 48px;
+  padding-bottom: 48px;
+}
+
+.intake-header {
+  text-align: center;
+  margin-bottom: 36px;
+}
+
+.intake-header h1 {
+  font-size: 2rem;
+  color: #1B2A4A;
+  margin-bottom: 12px;
+}
+
+.subtitle {
+  color: #666;
+  font-size: 1.05rem;
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.error-box {
+  background: #fff5f5;
+  border: 1px solid #fed7d7;
+  border-left: 4px solid #dc3545;
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin-bottom: 24px;
+}
+.error-box p {
+  color: #c53030;
+  font-size: 0.9rem;
+  margin-bottom: 4px;
+}
+.error-box p:last-child {
+  margin-bottom: 0;
+}
+
+.intake-form {
+  background: #fff;
+  padding: 32px;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #1B2A4A;
+  font-size: 0.9rem;
+}
+
+.required {
+  color: #dc3545;
+}
+
+.optional {
+  font-weight: 400;
+  color: #999;
+  font-size: 0.85rem;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  transition: border-color 0.2s;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: #2E8B8B;
+  box-shadow: 0 0 0 3px rgba(46, 139, 139, 0.1);
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.intake-form .btn {
+  width: 100%;
+  padding: 12px;
+  font-size: 1.05rem;
+  margin-top: 8px;
+}
+
+/* ─── Confirmation Page ───────────────────────────────────────────────────── */
+
+.confirmation-page {
+  max-width: 560px;
+  padding-top: 64px;
+  padding-bottom: 64px;
+}
+
+.confirmation-card {
+  background: #fff;
+  padding: 40px;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  text-align: center;
+}
+
+.confirmation-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: #d4edda;
+  color: #28a745;
+  font-size: 2rem;
+  line-height: 64px;
+  margin: 0 auto 20px;
+}
+
+.confirmation-card h1 {
+  color: #1B2A4A;
+  font-size: 1.6rem;
+  margin-bottom: 12px;
+}
+
+.ref-id {
+  font-size: 1.1rem;
+  margin-bottom: 16px;
+  color: #2E8B8B;
+}
+
+.confirmation-details {
+  text-align: left;
+  background: #f8f9fa;
+  padding: 20px;
+  border-radius: 6px;
+  margin: 24px 0;
+}
+
+.confirmation-details h3 {
+  font-size: 0.9rem;
+  color: #1B2A4A;
+  margin-bottom: 12px;
+}
+
+.confirmation-details dl {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px 12px;
+  font-size: 0.9rem;
+}
+
+.confirmation-details dt {
+  font-weight: 600;
+  color: #666;
+}
+
+/* ─── Admin Dashboard ─────────────────────────────────────────────────────── */
+
+.admin-page {
+  max-width: 1100px;
+  padding-top: 32px;
+  padding-bottom: 48px;
+}
+
+.admin-page h1 {
+  color: #1B2A4A;
+  margin-bottom: 24px;
+}
+
+.stats-bar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.stat-card {
+  background: #fff;
+  padding: 20px;
+  border-radius: 8px;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+.stat-number {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #1B2A4A;
+}
+
+.stat-label {
+  font-size: 0.85rem;
+  color: #666;
+  margin-top: 4px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 48px;
+  color: #999;
+}
+
+.audits-table {
+  width: 100%;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.audits-table th {
+  text-align: left;
+  padding: 12px 16px;
+  border-bottom: 2px solid #e9ecef;
+  color: #1B2A4A;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.audits-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.audits-table tr:last-child td {
+  border-bottom: none;
+}
+
+.url-cell {
+  max-width: 250px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status badges */
+.status-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.status-pending     { background: #fff3cd; color: #856404; }
+.status-crawling    { background: #d1ecf1; color: #0c5460; }
+.status-crawl_complete { background: #d4edda; color: #155724; }
+.status-analysing   { background: #d1ecf1; color: #0c5460; }
+.status-report_ready { background: #d4edda; color: #155724; }
+.status-error       { background: #f8d7da; color: #721c24; }
+
+.text-muted {
+  color: #999;
+  font-size: 0.85rem;
+}
+
+/* ─── Audit Detail (Admin) ────────────────────────────────────────────────── */
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.detail-header h1 {
+  margin-bottom: 0;
+}
+
+.detail-section {
+  background: #fff;
+  padding: 24px;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  margin-bottom: 20px;
+}
+
+.detail-section h2 {
+  font-size: 1.1rem;
+  color: #1B2A4A;
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e9ecef;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 8px 16px;
+  font-size: 0.9rem;
+}
+
+.detail-grid dt {
+  font-weight: 600;
+  color: #666;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 12px;
+}
+
+.crawl-page-card {
+  border: 1px solid #e9ecef;
+  padding: 16px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.crawl-page-card h3 {
+  font-size: 0.95rem;
+  color: #1B2A4A;
+  margin-bottom: 4px;
+}
+
+.crawl-page-card h3 small {
+  font-weight: 400;
+  color: #666;
+}
+
+.crawl-screenshot {
+  max-width: 100%;
+  border: 1px solid #e9ecef;
+  border-radius: 4px;
+  margin: 8px 0;
+}
+
+.raw-data {
+  margin-top: 12px;
+}
+
+.raw-data h4 {
+  font-size: 0.8rem;
+  color: #666;
+  margin: 12px 0 4px;
+}
+
+.raw-data pre,
+pre.raw-data {
+  background: #f8f9fa;
+  padding: 12px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+details summary {
+  cursor: pointer;
+  color: #2E8B8B;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+/* ─── Responsive ──────────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .intake-form {
+    padding: 20px;
+  }
+
+  .stats-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .audits-table {
+    font-size: 0.8rem;
+  }
+
+  .audits-table th,
+  .audits-table td {
+    padding: 8px 10px;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─── Status Messages ────────────────────────────────────────────────────── */
+
+.status-message {
+  padding: 16px 20px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.status-message--info {
+  background: #e8f4f8;
+  border: 1px solid #b8dae6;
+  color: #1a5276;
+}
+
+.status-message--error {
+  background: #fdf0ef;
+  border: 1px solid #f5c6cb;
+  color: #721c24;
+}
+
+.spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 3px solid #b8dae6;
+  border-top-color: #2E8B8B;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.btn-secondary {
+  background: #fff;
+  color: #1B2A4A;
+  border: 1px solid #ccc;
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.btn-secondary:hover {
+  background: #f5f5f5;
+  border-color: #999;
+}
+
+.btn-danger {
+  background: #dc3545;
+  color: #fff;
+  border: none;
+}
+
+.btn-danger:hover {
+  background: #c82333;
 }
