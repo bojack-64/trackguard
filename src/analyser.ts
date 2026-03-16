@@ -57,6 +57,8 @@ IMPORTANT ANALYSIS GUIDELINES — read carefully:
 
 1. CRAWL TOOL LIMITATIONS vs CLIENT ISSUES: This data was captured by an external automated crawler. If measurement IDs appear as "G-X", "G-XXXXXX", or similar placeholders/masked values, this is a limitation of the crawl tool's ability to parse certain request formats — NOT a client-side configuration issue. Do not flag masked or placeholder measurement IDs as an issue. Instead, note this in the limitations section as "Some measurement IDs could not be fully resolved from server-side or proxied tracking requests."
 
+8. GOOGLE ADS CCM REQUESTS: Requests labelled [Google Ads CCM] are Google Ads Conversion Measurement pings sent to googlesyndication.com/ccm/collect or doubleclick.net. These do NOT carry a "tid" (measurement ID) parameter — this is by design, not a misconfiguration. Do not flag missing measurement IDs on CCM requests as an issue. They should be counted separately from GA4 measurement requests. Note them as "Google Ads conversion tracking is active via CCM" in positive findings if present.
+
 2. PAGE TYPE VARIATION IS NORMAL: Different page types naturally generate different numbers of GA4 requests and dataLayer events. A product page firing more events than a homepage is expected behaviour (view_item, ecommerce events, etc.). A pricing page may fire different events than an about page. Only flag request volume differences as issues if they indicate genuinely missing or duplicate tracking — not merely different counts across page types.
 
 3. REALISTIC THRESHOLDS FOR "EXCESSIVE" REQUESTS: Fewer than 15 GA4 requests per page load is generally normal for sites with multiple tracking configurations, consent mode, and conversion pixels. Only flag request volume as excessive above 15-20 per page, or if you see clear evidence of duplicate events (same event name firing multiple times with identical parameters) rather than legitimately distinct tracking calls.
@@ -86,6 +88,18 @@ When analysing GA4 configuration, look for:
 - Missing or misconfigured events
 - Consistency of tracking across different page types (remembering that different page types legitimately fire different events — see guideline 2)
 
+ENRICHED DATA YOU WILL RECEIVE — use it:
+- **DataLayer events** are deduplicated by event name, showing count and the FULL first payload. Check e-commerce events for required parameters (items, currency, value, transaction_id). Flag events with empty/null parameter values.
+- **GA4 requests** are parsed into individual fields: event name (en=), measurement ID (tid=), page location (dl=), Google Consent State (gcs=), session engagement (seg=), and whether it's an Enhanced Measurement event. Use the GCS value to verify consent is actually being passed to Google — e.g. "G111" means all consent granted, "G100" means only analytics_storage granted.
+- **Cross-page consistency matrices** show which GTM containers and dataLayer events appear on which pages/page types. Use these to identify pages with missing containers or events that only fire on some page types when they should fire everywhere.
+- **GA4 events by page** lists the specific event names captured per page. Use this to identify missing page_view events, duplicate events, or pages where expected events (like view_item on product pages) are absent.
+
+GCS (Google Consent State) values to know:
+- G1xx = ad_storage granted; G0xx = denied
+- Gx1x = analytics_storage granted; Gx0x = denied
+- Gxx1 = ad_user_data granted; Gxx0 = denied
+- Example: G111 = all granted, G100 = only ad_storage granted, G000 = all denied
+
 Respond in JSON format with this exact structure:
 {
   "health_score": number,
@@ -104,6 +118,219 @@ Respond in JSON format with this exact structure:
   "positive_findings": [string],
   "limitations": [string]
 }`;
+
+// ─── Data enrichment helpers ────────────────────────────────────────────────
+
+/**
+ * Parse GA4 collect URL parameters into structured data.
+ * Extracts event name, page location, measurement ID, consent state, etc.
+ */
+function parseGA4CollectUrl(url: string): {
+  event_name: string;
+  measurement_id: string;
+  page_location: string;
+  gcs: string;          // Google Consent State
+  session_engaged: string;
+  enhanced_measurement: boolean;
+  request_type: 'ga4' | 'google_ads_ccm' | 'unknown';
+  all_params: Record<string, string>;
+} {
+  const params: Record<string, string> = {};
+  let hostname = '';
+  let pathname = '';
+  try {
+    const urlObj = new URL(url);
+    hostname = urlObj.hostname;
+    pathname = urlObj.pathname;
+    urlObj.searchParams.forEach((v, k) => { params[k] = v; });
+  } catch {
+    // Some collect URLs may be malformed; try manual parse
+    const qIdx = url.indexOf('?');
+    if (qIdx >= 0) {
+      url.substring(qIdx + 1).split('&').forEach(pair => {
+        const [k, ...rest] = pair.split('=');
+        if (k) params[k] = decodeURIComponent(rest.join('=') || '');
+      });
+    }
+  }
+
+  const enhancedMeasurementEvents = ['scroll', 'click', 'file_download', 'video_start', 'video_progress', 'video_complete', 'view_search_results'];
+
+  // Detect Google Ads CCM (Conversion Measurement) requests — these use /ccm/collect
+  // and don't carry a tid parameter. They use gdid instead.
+  const isCCM = pathname.includes('/ccm/collect') ||
+    hostname.includes('googlesyndication.com') ||
+    hostname.includes('doubleclick.net');
+
+  let requestType: 'ga4' | 'google_ads_ccm' | 'unknown' = 'unknown';
+  if (isCCM) {
+    requestType = 'google_ads_ccm';
+  } else if (params['tid'] || pathname.includes('/g/collect')) {
+    requestType = 'ga4';
+  }
+
+  return {
+    event_name: params['en'] || 'unknown',
+    measurement_id: params['tid'] || '',
+    page_location: params['dl'] || '',
+    gcs: params['gcs'] || '',
+    session_engaged: params['seg'] || '',
+    enhanced_measurement: enhancedMeasurementEvents.includes(params['en'] || ''),
+    request_type: requestType,
+    all_params: params,
+  };
+}
+
+/**
+ * Analyse dataLayer events: deduplicate by event name, include first full payload,
+ * flag empty/null values, identify e-commerce events missing required params.
+ */
+function analyseDataLayerEvents(dlEvents: any[]): {
+  summary: string;
+  unique_events: { name: string; count: number; first_payload: Record<string, any>; issues: string[] }[];
+  total_count: number;
+} {
+  const byName = new Map<string, { count: number; first: any; issues: string[] }>();
+
+  const ecommerceRequiredParams: Record<string, string[]> = {
+    'add_to_cart': ['currency', 'value', 'items'],
+    'remove_from_cart': ['currency', 'value', 'items'],
+    'begin_checkout': ['currency', 'value', 'items'],
+    'purchase': ['transaction_id', 'currency', 'value', 'items'],
+    'view_item': ['currency', 'value', 'items'],
+    'view_item_list': ['item_list_id', 'items'],
+    'select_item': ['items'],
+    'add_payment_info': ['currency', 'value', 'payment_type'],
+    'add_shipping_info': ['currency', 'value', 'shipping_tier'],
+  };
+
+  for (const dl of dlEvents) {
+    const data = dl.data || dl;
+    const eventName = data.event || data.eventName || '(no event name)';
+
+    if (!byName.has(eventName)) {
+      const issues: string[] = [];
+
+      // Check for empty/null values in payload
+      const nullKeys = Object.entries(data)
+        .filter(([k, v]) => k !== 'event' && k !== 'gtm.uniqueEventId' && (v === null || v === '' || v === 'null' || v === undefined))
+        .map(([k]) => k);
+      if (nullKeys.length > 0) {
+        issues.push(`Empty/null values in: ${nullKeys.join(', ')}`);
+      }
+
+      // Check e-commerce required params
+      if (ecommerceRequiredParams[eventName]) {
+        const missing = ecommerceRequiredParams[eventName].filter(p => !(p in data) && !(data.ecommerce && p in data.ecommerce));
+        if (missing.length > 0) {
+          issues.push(`Missing required e-commerce params: ${missing.join(', ')}`);
+        }
+      }
+
+      // Check for page_view required params
+      if (eventName === 'page_view' || eventName === 'gtm.js') {
+        // page_view should ideally have page info
+      }
+
+      byName.set(eventName, { count: 0, first: data, issues });
+    }
+    byName.get(eventName)!.count++;
+  }
+
+  const unique_events = [...byName.entries()].map(([name, info]) => ({
+    name,
+    count: info.count,
+    first_payload: info.first,
+    issues: info.issues,
+  }));
+
+  return {
+    summary: unique_events.map(e => `${e.name} (×${e.count})`).join(', '),
+    unique_events,
+    total_count: dlEvents.length,
+  };
+}
+
+/**
+ * Build cross-page consistency matrices: which containers/events appear on which pages.
+ */
+function buildConsistencyMatrices(pageEntries: any[]): {
+  containerMatrix: string;
+  eventMatrix: string;
+  ga4ZeroPages: string[];
+  avgGA4Count: number;
+} {
+  // Container coverage matrix
+  const allContainers = new Set<string>();
+  const pageContainers = new Map<string, Set<string>>();
+
+  for (const page of pageEntries) {
+    const key = `${page.page_type}: ${page.page_url}`;
+    const gtmReqs = safeParseJSON(page.gtm_requests, []);
+    const containers = new Set<string>();
+    for (const r of gtmReqs) {
+      if (r.container_id) {
+        allContainers.add(r.container_id);
+        containers.add(r.container_id);
+      }
+    }
+    pageContainers.set(key, containers);
+  }
+
+  let containerMatrix = '';
+  if (allContainers.size > 0) {
+    const containerIds = [...allContainers];
+    containerMatrix = `| Page | ${containerIds.join(' | ')} |\n`;
+    containerMatrix += `| --- | ${containerIds.map(() => '---').join(' | ')} |\n`;
+    for (const [pageKey, containers] of pageContainers) {
+      const shortKey = pageKey.length > 40 ? pageKey.substring(0, 40) + '...' : pageKey;
+      containerMatrix += `| ${shortKey} | ${containerIds.map(c => containers.has(c) ? '✓' : '✗').join(' | ')} |\n`;
+    }
+  }
+
+  // Event coverage matrix (by page type, not individual page)
+  const allEventNames = new Set<string>();
+  const typeEvents = new Map<string, Set<string>>();
+
+  for (const page of pageEntries) {
+    const dlEvents = safeParseJSON(page.datalayer_events, []);
+    if (!typeEvents.has(page.page_type)) typeEvents.set(page.page_type, new Set());
+    for (const dl of dlEvents) {
+      const name = (dl.data || dl).event || (dl.data || dl).eventName;
+      if (name && !name.startsWith('gtm.')) {
+        allEventNames.add(name);
+        typeEvents.get(page.page_type)!.add(name);
+      }
+    }
+  }
+
+  let eventMatrix = '';
+  if (allEventNames.size > 0) {
+    const eventNames = [...allEventNames].slice(0, 20); // Cap at 20 to keep manageable
+    const types = [...typeEvents.keys()];
+    eventMatrix = `| Event | ${types.join(' | ')} |\n`;
+    eventMatrix += `| --- | ${types.map(() => '---').join(' | ')} |\n`;
+    for (const evt of eventNames) {
+      eventMatrix += `| ${evt} | ${types.map(t => typeEvents.get(t)!.has(evt) ? '✓' : '✗').join(' | ')} |\n`;
+    }
+  }
+
+  // Pages with zero GA4
+  const ga4ZeroPages: string[] = [];
+  let totalGA4 = 0;
+  for (const page of pageEntries) {
+    const count = safeParseJSON(page.ga4_requests, []).length;
+    totalGA4 += count;
+    if (count === 0) ga4ZeroPages.push(`${page.page_type}: ${page.page_url}`);
+  }
+
+  return {
+    containerMatrix,
+    eventMatrix,
+    ga4ZeroPages,
+    avgGA4Count: pageEntries.length > 0 ? Math.round(totalGA4 / pageEntries.length * 10) / 10 : 0,
+  };
+}
 
 // ─── Prompt construction ────────────────────────────────────────────────────
 
@@ -156,7 +383,10 @@ ${consentData.postConsentState
 ### GA4 Requests That Fired After Consent Was Granted
 ${consentData.postConsentGA4Requests.length > 0
   ? consentData.postConsentGA4Requests
-      .map(r => `- Event: ${r.event_names.join(', ') || 'unknown'} | Measurement ID: ${r.measurement_id || 'unknown'}`)
+      .map(r => {
+        const parsed = parseGA4CollectUrl(r.url || '');
+        return `- Event: ${parsed.event_name} | Measurement ID: ${r.measurement_id || parsed.measurement_id || 'unknown'} | GCS: ${parsed.gcs || 'not present'} | Page: ${parsed.page_location || 'unknown'}`;
+      })
       .join('\n')
   : 'No GA4 requests fired after consent was granted'}
 
@@ -170,13 +400,12 @@ ${consentData.postConsentDataLayer.length > 0
   }
 
   // ── Consent-without-banner context ──
-  // If consent state exists in dataLayer but no banner was shown, explain the context
   if (consentData && !consentData.bannerFound && consentData.defaultConsentState) {
     sections.push(`## Consent Context Note
 The crawl detected consent state values in the dataLayer (see above) but NO visible consent banner was displayed. The CMP may be configured to suppress the banner in certain jurisdictions while still applying deny-all defaults. This does NOT necessarily indicate a misconfiguration.`);
   }
 
-  // ── Per-page crawl data ──
+  // ── Per-page crawl data (enriched) ──
   const pageEntries = crawlData.filter(p => p.page_type !== 'consent_check');
   sections.push(`## Pages Crawled (${pageEntries.length} pages)\n`);
 
@@ -187,25 +416,59 @@ The crawl detected consent state values in the dataLayer (see above) but NO visi
     const consoleErrs = safeParseJSON(page.console_errors, []);
     const proxies = safeParseJSON(page.potential_proxies, []);
 
+    // Enriched dataLayer analysis
+    const dlAnalysis = analyseDataLayerEvents(dlEvents);
+
+    // Enriched GA4 request parsing
+    const parsedGA4 = ga4Reqs.map((r: any) => parseGA4CollectUrl(r.url || ''));
+
+    // Format load time — if it's >= 29000ms, it's likely a networkidle timeout, not a real measurement
+    const loadMs = page.page_load_ms || 0;
+    const loadTimeDisplay = loadMs >= 29000
+      ? `${(loadMs / 1000).toFixed(1)}s+ (networkidle timeout — page was still loading)`
+      : `${loadMs}ms`;
+
     sections.push(`### Page: ${page.page_type} — ${page.page_url}
-- Load time: ${page.page_load_ms}ms
-- DataLayer events captured: ${dlEvents.length}
+- Load time: ${loadTimeDisplay}
+- DataLayer events: ${dlAnalysis.total_count} total, ${dlAnalysis.unique_events.length} unique
 - GA4 network requests: ${ga4Reqs.length}
 - GTM container loads: ${gtmReqs.length}
 - Console errors/warnings: ${consoleErrs.length}
 
-#### DataLayer Events
-${dlEvents.length > 0
-  ? dlEvents.slice(0, 20).map((d: any) => {
-      const s = JSON.stringify(d.data || d);
-      return `- ${s.substring(0, 400)}`;
+#### DataLayer Events (deduplicated with first payload)
+${dlAnalysis.unique_events.length > 0
+  ? dlAnalysis.unique_events.slice(0, 25).map(e => {
+      // Show event name, count, key parameters (not gtm internals)
+      const cleanPayload = { ...e.first_payload };
+      delete cleanPayload['gtm.uniqueEventId'];
+      delete cleanPayload['gtm.start'];
+      delete cleanPayload['gtm.triggers'];
+      delete cleanPayload['gtm.scrollThreshold'];
+      delete cleanPayload['gtm.scrollUnits'];
+      delete cleanPayload['gtm.scrollDirection'];
+      delete cleanPayload['gtm.oldHistoryUrl'];
+      delete cleanPayload['gtm.newHistoryUrl'];
+      delete cleanPayload['gtm.oldUrl'];
+      delete cleanPayload['gtm.newUrl'];
+      const payloadStr = JSON.stringify(cleanPayload).substring(0, 500);
+      let line = `- **${e.name}** (×${e.count}): ${payloadStr}`;
+      if (e.issues.length > 0) {
+        line += `\n  ⚠️ ${e.issues.join('; ')}`;
+      }
+      return line;
     }).join('\n')
   : '(none captured)'}
 
-#### GA4 Requests
-${ga4Reqs.length > 0
-  ? ga4Reqs.map((r: any) => {
-      return `- Event: ${(r.event_names || []).join(', ') || 'unknown'} | Measurement ID: ${r.measurement_id || 'unknown'} | Params: ${Object.keys(r.params || {}).length}`;
+#### GA4 Requests (parsed)
+${parsedGA4.length > 0
+  ? parsedGA4.map((p: any) => {
+      const typeLabel = p.request_type === 'google_ads_ccm' ? '[Google Ads CCM]' : '[GA4]';
+      let line = `- ${typeLabel} **${p.event_name}** → ${p.measurement_id || (p.request_type === 'google_ads_ccm' ? '(CCM — no tid expected)' : 'no tid')}`;
+      if (p.gcs) line += ` | GCS: ${p.gcs}`;
+      if (p.session_engaged) line += ` | Engaged: ${p.session_engaged}`;
+      if (p.enhanced_measurement) line += ` | [Enhanced Measurement]`;
+      if (p.page_location) line += ` | Page: ${p.page_location.substring(0, 100)}`;
+      return line;
     }).join('\n')
   : '(none captured)'}
 
@@ -251,27 +514,35 @@ ${proxies.length > 0
 - GTM Container IDs: ${[...allContainerIds].join(', ') || 'none'}
 - Potential First-Party Analytics Proxy Domains: ${[...allProxyDomains].join(', ') || 'none'}`);
 
-  // ── Homepage GA4 requests vs other pages (consistency check data) ──
-  const homepagePage = pageEntries.find(p => p.page_type === 'homepage');
-  const otherPages = pageEntries.filter(p => p.page_type !== 'homepage');
-  if (homepagePage && otherPages.length > 0) {
-    const homeGA4Count = safeParseJSON(homepagePage.ga4_requests, []).length;
-    const homeGTMCount = safeParseJSON(homepagePage.gtm_requests, []).length;
-    const otherGA4Counts = otherPages.map(p => ({
-      type: p.page_type,
-      count: safeParseJSON(p.ga4_requests, []).length,
-    }));
-    const otherGTMCounts = otherPages.map(p => ({
-      type: p.page_type,
-      count: safeParseJSON(p.gtm_requests, []).length,
-    }));
+  // ── Cross-page consistency matrices ──
+  const consistency = buildConsistencyMatrices(pageEntries);
 
-    sections.push(`## Cross-Page Consistency
-- Homepage GA4 requests: ${homeGA4Count}
-- Homepage GTM loads: ${homeGTMCount}
-${otherGA4Counts.map(c => `- ${c.type} page GA4 requests: ${c.count}`).join('\n')}
-${otherGTMCounts.map(c => `- ${c.type} page GTM loads: ${c.count}`).join('\n')}`);
+  let consistencySection = `## Cross-Page Consistency Analysis\n`;
+  consistencySection += `- Average GA4 requests per page: ${consistency.avgGA4Count}\n`;
+
+  if (consistency.ga4ZeroPages.length > 0) {
+    consistencySection += `- ⚠️ Pages with ZERO GA4 requests: ${consistency.ga4ZeroPages.join('; ')}\n`;
+  } else {
+    consistencySection += `- All pages have at least one GA4 request ✓\n`;
   }
+
+  if (consistency.containerMatrix) {
+    consistencySection += `\n### GTM Container Coverage Matrix\n${consistency.containerMatrix}`;
+  }
+
+  if (consistency.eventMatrix) {
+    consistencySection += `\n### DataLayer Event Coverage by Page Type\n${consistency.eventMatrix}`;
+  }
+
+  // Per-page GA4 event breakdown
+  consistencySection += `\n### GA4 Events by Page\n`;
+  for (const page of pageEntries) {
+    const ga4Reqs = safeParseJSON(page.ga4_requests, []);
+    const eventNames = ga4Reqs.map((r: any) => parseGA4CollectUrl(r.url || '').event_name);
+    consistencySection += `- ${page.page_type} (${page.page_url}): ${eventNames.length > 0 ? eventNames.join(', ') : 'none'}\n`;
+  }
+
+  sections.push(consistencySection);
 
   return sections.join('\n\n');
 }

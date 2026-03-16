@@ -387,7 +387,7 @@ function renderPagesSummary(crawlPages: any[]): string {
             return `<tr>
               <td><span class="page-type-badge">${escHtml(p.page_type)}</span></td>
               <td class="url-cell"><a href="${escHtml(p.page_url)}" target="_blank" rel="noopener" title="${escHtml(p.page_url)}">${escHtml(shortUrl)}</a></td>
-              <td>${p.page_load_ms > 0 ? (p.page_load_ms / 1000).toFixed(1) + 's' : '—'}</td>
+              <td>${p.page_load_ms >= 29000 ? (p.page_load_ms / 1000).toFixed(0) + 's+ (timeout)' : p.page_load_ms > 0 ? (p.page_load_ms / 1000).toFixed(1) + 's' : '—'}</td>
               <td>${dl.length}</td>
               <td>${ga4.length}</td>
             </tr>`;
