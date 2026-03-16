@@ -1,0 +1,15 @@
+{
+  "name": "trackguard",
+  "version": "0.1.0",
+  "description": "Web tracking QA and monitoring tool for performance agencies",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc --watch & nodemon dist/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "UNLICENSED",
+  "private": true
+}

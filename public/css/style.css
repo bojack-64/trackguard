@@ -1,0 +1,16 @@
+/* TrackGuard — Styles
+   Navy: #1B2A4A
+   Teal: #2E8B8B
+   See build prompt for design direction. */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #333;
+  line-height: 1.6;
+}
