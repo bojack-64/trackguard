@@ -17,8 +17,8 @@ import { saveReport } from './database';
 // Store consent data in memory keyed by audit ID (simple approach for V1)
 const consentCache = new Map<number, ConsentResult>();
 
-// Load environment variables from .env
-dotenv.config();
+// Load environment variables from .env (use absolute path so it works regardless of CWD)
+dotenv.config({ path: path.join(__dirname, '..', '.env'), override: true });
 
 const app: express.Express = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -186,8 +186,20 @@ app.post('/admin/audit/:id/generate-report', (req, res) => {
 
       updateAuditStatus(audit.id, 'report_ready');
       console.log(`[Server] Report generated for audit ${audit.id}`);
-    } catch (err) {
-      console.error(`[Server] Report generation failed for audit ${audit.id}:`, err);
+    } catch (err: any) {
+      console.error(`\n${'='.repeat(60)}`);
+      console.error(`[Server] REPORT GENERATION FAILED — Audit ${audit.id}`);
+      console.error(`${'='.repeat(60)}`);
+      console.error(`Error type: ${err?.constructor?.name || typeof err}`);
+      console.error(`Message: ${err?.message || err}`);
+      if (err?.status) console.error(`HTTP Status: ${err.status}`);
+      if (err?.error) console.error(`API Error body:`, JSON.stringify(err.error, null, 2));
+      if (err?.headers) {
+        const retryAfter = err.headers?.['retry-after'];
+        if (retryAfter) console.error(`Retry-After: ${retryAfter}`);
+      }
+      console.error(`Stack trace:`, err?.stack || '(no stack)');
+      console.error(`${'='.repeat(60)}\n`);
       updateAuditStatus(audit.id, 'error');
     }
   })();

@@ -27,8 +27,22 @@ export function initDatabase(dbPath?: string): Database.Database {
   db.pragma('foreign_keys = ON');
 
   createTables();
+  runMigrations();
 
   return db;
+}
+
+/**
+ * Run schema migrations that add columns to existing tables.
+ * Each migration is idempotent — safe to run repeatedly.
+ */
+function runMigrations(): void {
+  // Add potential_proxies column to crawl_pages (v1.1)
+  try {
+    db.exec(`ALTER TABLE crawl_pages ADD COLUMN potential_proxies TEXT`);
+  } catch {
+    // Column already exists — ignore
+  }
 }
 
 /**
@@ -77,6 +91,9 @@ function createTables(): void {
       raw_network_log   TEXT,
       crawled_at        TEXT DEFAULT (datetime('now'))
     );
+
+    -- potential_proxies column added in v1.1
+    -- SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we handle it in code
 
     CREATE TABLE IF NOT EXISTS reports (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,6 +187,7 @@ export interface CrawlPageRow {
   screenshot_path: string | null;
   page_load_ms: number | null;
   raw_network_log: string | null;
+  potential_proxies: string | null;
   crawled_at: string;
 }
 
@@ -188,10 +206,11 @@ export function insertCrawlPage(data: {
   screenshot_path?: string;
   page_load_ms?: number;
   raw_network_log?: string;
+  potential_proxies?: string;
 }): number {
   const stmt = getDb().prepare(`
-    INSERT INTO crawl_pages (audit_id, page_url, page_type, datalayer_events, ga4_requests, gtm_requests, consent_state, console_errors, screenshot_path, page_load_ms, raw_network_log)
-    VALUES (@audit_id, @page_url, @page_type, @datalayer_events, @ga4_requests, @gtm_requests, @consent_state, @console_errors, @screenshot_path, @page_load_ms, @raw_network_log)
+    INSERT INTO crawl_pages (audit_id, page_url, page_type, datalayer_events, ga4_requests, gtm_requests, consent_state, console_errors, screenshot_path, page_load_ms, raw_network_log, potential_proxies)
+    VALUES (@audit_id, @page_url, @page_type, @datalayer_events, @ga4_requests, @gtm_requests, @consent_state, @console_errors, @screenshot_path, @page_load_ms, @raw_network_log, @potential_proxies)
   `);
   const result = stmt.run({
     datalayer_events: null,
@@ -202,6 +221,7 @@ export function insertCrawlPage(data: {
     screenshot_path: null,
     page_load_ms: null,
     raw_network_log: null,
+    potential_proxies: null,
     ...data,
   });
   return result.lastInsertRowid as number;

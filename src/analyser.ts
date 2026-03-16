@@ -65,6 +65,14 @@ IMPORTANT ANALYSIS GUIDELINES — read carefully:
 
 5. EVIDENCE-BASED ONLY: Do not invent issues that aren't supported by the evidence. If the data for a particular check is missing or inconclusive, say so rather than guessing. Do not pad the report with generic best practices — only report issues you can see evidence for in the crawl data.
 
+6. FIRST-PARTY GA4 PROXIES: Some sites route GA4 tracking through a first-party proxy domain (e.g. "analytics.example.com" instead of "google-analytics.com"). When the crawl data shows GTM containers loading and dataLayer events firing BUT zero GA4 collect requests to Google domains, AND potential proxy domains are detected, this means GA4 is likely proxied — NOT missing. In this case:
+   - Do NOT flag "No GA4 tracking detected" as a critical issue
+   - DO note the proxy as an observation: "GA4 appears to be routed through a first-party proxy ([domain]), which limits external observation of measurement IDs and individual event data. This is a legitimate privacy/performance practice but means this audit cannot fully validate GA4 event configuration without access to the proxy endpoint or the GA4 property."
+   - Adjust the health score appropriately: a proxied site with active GTM and dataLayer should not score as if it has no analytics at all. Score based on what IS observable (consent compliance, GTM configuration, dataLayer quality, etc.)
+   - Include this in the limitations section rather than as an issue
+
+7. MISSING CONSENT BANNER WITH ACTIVE CONSENT STATE: If a CMP is detected in the dataLayer (e.g. OneTrust consent events, Cookiebot config) but no visible consent banner was shown, this is likely because the CMP is configured to auto-apply consent defaults without showing a banner in certain jurisdictions (e.g. a deny-all default in regions where that's sufficient). Do NOT flag this as "Missing consent banner" or "CMP not working." Instead note it as an observation: "CMP ([name]) detected in dataLayer with consent defaults applied, but no visible banner was shown during the crawl. This is likely jurisdiction-based banner suppression." Only flag it as an issue if consent defaults are set to granted (which could indicate misconfigured implied consent).
+
 When analysing consent data, pay special attention to:
 - Whether consent defaults are set to denied (as required by GDPR)
 - Whether analytics tags fire BEFORE consent is granted (a compliance violation)
@@ -161,6 +169,13 @@ ${consentData.postConsentDataLayer.length > 0
   : 'No post-consent dataLayer events captured'}`);
   }
 
+  // ── Consent-without-banner context ──
+  // If consent state exists in dataLayer but no banner was shown, explain the context
+  if (consentData && !consentData.bannerFound && consentData.defaultConsentState) {
+    sections.push(`## Consent Context Note
+The crawl detected consent state values in the dataLayer (see above) but NO visible consent banner was displayed. The CMP may be configured to suppress the banner in certain jurisdictions while still applying deny-all defaults. This does NOT necessarily indicate a misconfiguration.`);
+  }
+
   // ── Per-page crawl data ──
   const pageEntries = crawlData.filter(p => p.page_type !== 'consent_check');
   sections.push(`## Pages Crawled (${pageEntries.length} pages)\n`);
@@ -170,6 +185,7 @@ ${consentData.postConsentDataLayer.length > 0
     const ga4Reqs = safeParseJSON(page.ga4_requests, []);
     const gtmReqs = safeParseJSON(page.gtm_requests, []);
     const consoleErrs = safeParseJSON(page.console_errors, []);
+    const proxies = safeParseJSON(page.potential_proxies, []);
 
     sections.push(`### Page: ${page.page_type} — ${page.page_url}
 - Load time: ${page.page_load_ms}ms
@@ -201,7 +217,10 @@ ${gtmReqs.length > 0
 #### Console Errors/Warnings
 ${consoleErrs.length > 0
   ? consoleErrs.slice(0, 10).map((e: string) => `- ${e}`).join('\n')
-  : '(none)'}`);
+  : '(none)'}
+${proxies.length > 0
+  ? `\n#### Potential First-Party GA4 Proxies\n${proxies.map((p: any) => `- Domain: ${p.domain} (detected via: ${p.reason}) — ${p.url}`).join('\n')}`
+  : ''}`);
   }
 
   // ── Summary of all measurement IDs seen ──
@@ -218,9 +237,19 @@ ${consoleErrs.length > 0
     }
   }
 
+  // ── Collect all proxy domains across pages ──
+  const allProxyDomains = new Set<string>();
+  for (const page of pageEntries) {
+    const proxies = safeParseJSON(page.potential_proxies, []);
+    for (const p of proxies) {
+      if (p.domain) allProxyDomains.add(p.domain);
+    }
+  }
+
   sections.push(`## Summary of IDs Detected Across All Pages
 - GA4/Google Ads Measurement IDs: ${[...allMeasurementIds].join(', ') || 'none'}
-- GTM Container IDs: ${[...allContainerIds].join(', ') || 'none'}`);
+- GTM Container IDs: ${[...allContainerIds].join(', ') || 'none'}
+- Potential First-Party Analytics Proxy Domains: ${[...allProxyDomains].join(', ') || 'none'}`);
 
   // ── Homepage GA4 requests vs other pages (consistency check data) ──
   const homepagePage = pageEntries.find(p => p.page_type === 'homepage');
@@ -274,17 +303,30 @@ export async function analyseAudit(
 
   console.log(`[Analyser] Sending ${userPrompt.length} chars to Anthropic API for audit ${audit.id}...`);
 
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 4096,
-    system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: 'user',
-        content: userPrompt,
-      },
-    ],
-  });
+  console.log(`[Analyser] System prompt: ${SYSTEM_PROMPT.length} chars`);
+  console.log(`[Analyser] User prompt: ${userPrompt.length} chars`);
+  console.log(`[Analyser] Total prompt size: ~${Math.round((SYSTEM_PROMPT.length + userPrompt.length) / 1000)}k chars`);
+
+  let response;
+  try {
+    response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      messages: [
+        {
+          role: 'user',
+          content: userPrompt,
+        },
+      ],
+    });
+  } catch (apiErr: any) {
+    console.error(`[Analyser] Anthropic API call failed:`);
+    console.error(`  Status: ${apiErr?.status || 'unknown'}`);
+    console.error(`  Message: ${apiErr?.message || apiErr}`);
+    if (apiErr?.error) console.error(`  Error body:`, JSON.stringify(apiErr.error, null, 2));
+    throw apiErr;
+  }
 
   // Extract the text response
   const textBlock = response.content.find(b => b.type === 'text');

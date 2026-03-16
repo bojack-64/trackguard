@@ -31,6 +31,12 @@ interface GTMRequest {
   timestamp: number;
 }
 
+interface ProxyDetection {
+  domain: string;
+  reason: string; // 'ga4_script' | 'ga4_payload' | 'collect_endpoint'
+  url: string;
+}
+
 export interface PageCrawlResult {
   pageUrl: string;
   pageType: string;
@@ -41,6 +47,7 @@ export interface PageCrawlResult {
   screenshotPath: string | null;
   pageLoadMs: number;
   rawNetworkLog: { url: string; method: string; status: number | null }[];
+  potentialProxies: ProxyDetection[];
 }
 
 export interface ConsentResult {
@@ -125,15 +132,38 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
 
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
+        '--window-size=1440,900',
+      ],
     });
 
     const context = await browser.newContext({
       userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       viewport: { width: 1440, height: 900 },
       locale: 'en-US',
+      javaScriptEnabled: true,
+      // Note: bypassCSP and extraHTTPHeaders intentionally omitted — they break
+      // Angular/SPA rendering on sites like Paddy Power. The user agent string
+      // and locale are sufficient for realistic browsing behaviour.
     });
+
+    // ── Stealth: mask navigator.webdriver and other automation signals ──
+    // Note: languages and plugins overrides are intentionally excluded — they
+    // break Angular/SPA rendering on some sites (e.g. Paddy Power). The webdriver
+    // flag and chrome object are the most important stealth measures.
+    await context.addInitScript(`
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      if (window.chrome === undefined) {
+        Object.defineProperty(window, 'chrome', {
+          get: () => ({ runtime: {} }),
+        });
+      }
+    `);
 
     // ── Step 1: Crawl homepage ──
     const homepageResult = await crawlPage(context, audit, audit.website_url, 'homepage');
@@ -154,6 +184,7 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
         screenshotPath: consentResult.bannerScreenshot,
         pageLoadMs: 0,
         rawNetworkLog: [],
+        potentialProxies: [],
       });
     } catch (consentErr) {
       console.error('[Crawler] Consent check failed:', consentErr);
@@ -162,19 +193,34 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
     // ── Step 3: Discover pages from homepage links ──
     // We need the homepage page object for link extraction, but crawlPage
     // closes its page. So we open a lightweight page just for link discovery.
+    // IMPORTANT: Use networkidle + DOM stability check for SPAs (Angular, React, Vue)
+    // that render navigation links dynamically after the HTML shell loads.
     let discoveredPages: DiscoveredPage[] = [];
     try {
       const discoveryPage = await context.newPage();
-      // Use domcontentloaded — we only need the DOM, not full load
       try {
         await discoveryPage.goto(audit.website_url, {
-          waitUntil: 'domcontentloaded',
-          timeout: 15000,
+          waitUntil: 'networkidle',
+          timeout: 20000,
         });
       } catch (navErr) {
         const msg = navErr instanceof Error ? navErr.message : '';
         if (!msg.includes('Timeout') && !msg.includes('timeout')) throw navErr;
-        // Timeout is fine — DOM should be available
+        // Timeout is fine — continue with whatever is rendered
+      }
+
+      // Wait for SPA navigation links to render — poll until we have
+      // a reasonable number of anchor elements in the DOM
+      try {
+        await discoveryPage.waitForFunction(`
+          (function() {
+            var anchors = document.querySelectorAll('a[href]');
+            return anchors.length > 10;
+          })()
+        `, { timeout: 8000 });
+      } catch {
+        // Didn't get many links — proceed with what we have
+        console.log('[Crawler] Link discovery: few links found after waiting, proceeding with available');
       }
 
       discoveredPages = await discoverPages(discoveryPage, audit.website_url, 7);
@@ -231,6 +277,7 @@ function saveCrawlResult(auditId: number, result: PageCrawlResult): void {
     screenshot_path: result.screenshotPath || undefined,
     page_load_ms: result.pageLoadMs,
     raw_network_log: JSON.stringify(result.rawNetworkLog),
+    potential_proxies: JSON.stringify(result.potentialProxies || []),
   });
 }
 
@@ -272,9 +319,9 @@ const PAGE_TYPE_RULES: { type: string; patterns: RegExp[]; priority: number }[] 
   {
     type: 'cart',
     patterns: [
-      /\/cart/i,
-      /\/basket/i,
-      /\/bag/i,
+      /\/cart(\/|$|\?)/i,
+      /\/basket(\/|$|\?)/i,
+      /\/bag(\/|$|\?)/i,
     ],
     priority: 3,
   },
@@ -444,8 +491,10 @@ async function discoverPages(
     if (selected.length >= maxPages) break;
 
     const count = typeCounts.get(page.pageType) || 0;
-    // Allow 1 of each named type, up to 2 'other' pages for breadth
-    const maxPerType = page.pageType === 'other' ? 2 : 1;
+    // Allow 1 of each named type, up to 5 'other' pages for breadth.
+    // Sites that don't match standard e-commerce patterns (betting, SaaS,
+    // media sites) will have most pages as 'other' — we still want coverage.
+    const maxPerType = page.pageType === 'other' ? 5 : 1;
     if (count >= maxPerType) continue;
 
     typeCounts.set(page.pageType, count + 1);
@@ -798,6 +847,68 @@ async function takeElementScreenshot(page: Page, element: import('playwright').E
   }
 }
 
+// ─── Interstitial / Modal Dismissal ──────────────────────────────────────────
+
+/**
+ * Common selectors for interstitials, modals, overlays, and gates that block
+ * page content. Tries to click dismiss/close/continue buttons.
+ * Returns true if something was dismissed.
+ */
+async function dismissInterstitials(page: Page): Promise<boolean> {
+  // Selectors for modal/overlay close or dismiss buttons (ordered by specificity)
+  const dismissSelectors = [
+    // Close buttons
+    '[class*="modal"] [class*="close"]',
+    '[class*="overlay"] [class*="close"]',
+    '[class*="dialog"] [class*="close"]',
+    '[class*="popup"] [class*="close"]',
+    '[aria-label="Close"]',
+    '[aria-label="close"]',
+    'button[class*="dismiss"]',
+    'button[class*="close-btn"]',
+    '.modal-close',
+    '.close-modal',
+
+    // Age verification / location gates
+    'button[class*="enter" i]',
+    'button[class*="verify" i]',
+    'a[class*="enter-site" i]',
+    '[class*="age-gate"] button',
+    '[class*="age-verify"] button',
+
+    // "Continue" / "Accept" / "Got it" buttons on interstitials
+    '[class*="interstitial"] button',
+    '[class*="splash"] button',
+    '[class*="welcome"] button[class*="continue" i]',
+    '[class*="welcome"] button[class*="accept" i]',
+    'button[class*="got-it" i]',
+    'button[class*="continue" i]',
+  ];
+
+  for (const selector of dismissSelectors) {
+    try {
+      const el = await page.$(selector);
+      if (el && await el.isVisible()) {
+        const text = (await el.textContent() || '').trim();
+        // Sanity check: don't click things that look like navigation or login
+        const safeText = text.toLowerCase();
+        if (safeText.includes('sign up') || safeText.includes('register') ||
+            safeText.includes('login') || safeText.includes('log in') ||
+            safeText.includes('subscribe')) {
+          continue;
+        }
+        await el.click();
+        console.log(`[Crawler] Dismissed interstitial: clicked "${selector}" (text: "${text.substring(0, 50)}")`);
+        return true;
+      }
+    } catch {
+      // Selector not found or not clickable — try next
+    }
+  }
+
+  return false;
+}
+
 // ─── Single page crawl ─────────────────────────────────────────────────────
 
 /**
@@ -816,6 +927,8 @@ async function crawlPage(
   const gtmRequests: GTMRequest[] = [];
   const consoleErrors: string[] = [];
   const rawNetworkLog: { url: string; method: string; status: number | null }[] = [];
+  const potentialProxies: ProxyDetection[] = [];
+  const seenProxyDomains = new Set<string>();
   let screenshotPath: string | null = null;
 
   try {
@@ -889,6 +1002,61 @@ async function crawlPage(
         });
       }
 
+      // ── Detect potential GA4 first-party proxies ──
+      // Look for non-Google domains serving GA4-related scripts or collect endpoints
+      try {
+        const parsedUrl = new URL(respUrl);
+        const domain = parsedUrl.hostname;
+        const isGoogleDomain = domain.endsWith('google.com') || domain.endsWith('google-analytics.com')
+          || domain.endsWith('googletagmanager.com') || domain.endsWith('googleapis.com')
+          || domain.endsWith('gstatic.com') || domain.endsWith('doubleclick.net');
+
+        if (!isGoogleDomain && !seenProxyDomains.has(domain)) {
+          const urlLower = respUrl.toLowerCase();
+          const pathLower = parsedUrl.pathname.toLowerCase();
+          const contentType = response.headers()['content-type'] || '';
+
+          // Signal 1: Non-Google script with GA4/analytics keywords in path or filename
+          if (contentType.includes('javascript') || pathLower.endsWith('.js')) {
+            const ga4ScriptPatterns = [
+              /ga4/i, /gtag/i, /analytics[_-]?wrapper/i, /measurement/i,
+              /google[_-]?tag/i, /g[_-]?collect/i,
+            ];
+            if (ga4ScriptPatterns.some(p => p.test(pathLower))) {
+              seenProxyDomains.add(domain);
+              potentialProxies.push({
+                domain,
+                reason: 'ga4_script',
+                url: respUrl.substring(0, 300),
+              });
+            }
+          }
+
+          // Signal 2: Non-Google endpoint with GA4 payload parameters (v=2&tid=&en=)
+          const params = parsedUrl.searchParams;
+          if (params.get('v') === '2' && params.has('tid') && params.has('en')) {
+            seenProxyDomains.add(domain);
+            potentialProxies.push({
+              domain,
+              reason: 'ga4_payload',
+              url: respUrl.substring(0, 300),
+            });
+          }
+
+          // Signal 3: Non-Google domain with /collect endpoint and GA4-style path
+          if (pathLower.includes('/collect') && (params.has('tid') || params.has('v'))) {
+            if (!seenProxyDomains.has(domain)) {
+              seenProxyDomains.add(domain);
+              potentialProxies.push({
+                domain,
+                reason: 'collect_endpoint',
+                url: respUrl.substring(0, 300),
+              });
+            }
+          }
+        }
+      } catch { /* URL parsing failed — skip proxy check */ }
+
       // Keep a filtered network log (analytics-related only)
       if (
         respUrl.includes('google') ||
@@ -949,17 +1117,70 @@ async function crawlPage(
     await page.waitForTimeout(timedOut ? 2000 : 3000);
 
     // ── Extract dataLayer + gtag data from the page ──
-    // This runs regardless of whether networkidle succeeded or timed out.
+    // Do this BEFORE waiting for DOM — analytics data should already be available.
     await extractPageData(page, dataLayerEvents);
 
+    // ── Wait for DOM to stabilise (SPA rendering) ──
+    // SPA frameworks (Angular, React, Vue) may take extra time to render after
+    // the HTML document loads. Poll until the body has meaningful content.
+    try {
+      await page.waitForFunction(`
+        (function() {
+          var body = document.body;
+          if (!body) return false;
+          // Check body has meaningful content: enough child elements and scroll height
+          return body.children.length > 5 && body.scrollHeight > 500;
+        })()
+      `, { timeout: 8000 });
+    } catch {
+      // DOM didn't stabilise in time — proceed anyway, screenshot whatever we have
+      console.log(`[Crawler] DOM stabilisation timeout on "${pageType}" — content may be sparse`);
+    }
+
+    // ── Dismiss interstitials/modals blocking the page ──
+    // Some sites show location selectors, age gates, or welcome modals.
+    // Try to dismiss them before taking the screenshot.
+    try {
+      const dismissed = await dismissInterstitials(page);
+      if (dismissed) {
+        // Wait a moment for the page to update after dismissal
+        await page.waitForTimeout(1500);
+      }
+    } catch {
+      // Interstitial dismissal failed — not critical, continue
+    }
+
+    // ── Diagnostic logging: what page did we actually land on? ──
+    const finalUrl = page.url();
+    const pageTitle = await page.title().catch(() => '(could not read title)');
+    const htmlSample = await page.evaluate('document.documentElement.outerHTML.substring(0, 500)').catch(() => '(could not read HTML)');
+    console.log(`[Crawler] Diagnostics for "${pageType}":`);
+    console.log(`  Final URL: ${finalUrl}`);
+    console.log(`  Page title: ${pageTitle}`);
+    console.log(`  HTML (first 500 chars): ${htmlSample}`);
+    if (finalUrl !== url) {
+      console.log(`  ⚠ REDIRECT detected: ${url} → ${finalUrl}`);
+      consoleErrors.push(`Redirect: ${url} → ${finalUrl}`);
+    }
+
     // ── Screenshot ──
+    // Taken AFTER DOM stabilisation and interstitial dismissal for best quality.
     screenshotPath = await takeScreenshot(page, audit.id, pageType);
+
+    // Log proxy detections
+    if (potentialProxies.length > 0) {
+      console.log(`[Crawler] ⚠ Potential GA4 proxies detected on "${pageType}":`);
+      for (const p of potentialProxies) {
+        console.log(`  ${p.domain} (${p.reason}): ${p.url}`);
+      }
+    }
 
     console.log(
       `[Crawler] Page "${pageType}" done${timedOut ? ' (partial)' : ''} — ` +
       `${dataLayerEvents.length} dataLayer events, ` +
       `${ga4Requests.length} GA4 requests, ` +
       `${gtmRequests.length} GTM loads, ` +
+      `${potentialProxies.length > 0 ? potentialProxies.length + ' proxy domains, ' : ''}` +
       `${pageLoadMs}ms load time`
     );
 
@@ -973,6 +1194,7 @@ async function crawlPage(
       screenshotPath,
       pageLoadMs,
       rawNetworkLog,
+      potentialProxies,
     };
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
@@ -995,6 +1217,7 @@ async function crawlPage(
       screenshotPath,
       pageLoadMs: 0,
       rawNetworkLog,
+      potentialProxies,
     };
   } finally {
     await page.close();
