@@ -43,6 +43,13 @@ function runMigrations(): void {
   } catch {
     // Column already exists — ignore
   }
+
+  // Add dom_content_loaded_ms column (v1.2)
+  try {
+    db.exec(`ALTER TABLE crawl_pages ADD COLUMN dom_content_loaded_ms INTEGER`);
+  } catch {
+    // Column already exists — ignore
+  }
 }
 
 /**
@@ -205,12 +212,13 @@ export function insertCrawlPage(data: {
   console_errors?: string;
   screenshot_path?: string;
   page_load_ms?: number;
+  dom_content_loaded_ms?: number;
   raw_network_log?: string;
   potential_proxies?: string;
 }): number {
   const stmt = getDb().prepare(`
-    INSERT INTO crawl_pages (audit_id, page_url, page_type, datalayer_events, ga4_requests, gtm_requests, consent_state, console_errors, screenshot_path, page_load_ms, raw_network_log, potential_proxies)
-    VALUES (@audit_id, @page_url, @page_type, @datalayer_events, @ga4_requests, @gtm_requests, @consent_state, @console_errors, @screenshot_path, @page_load_ms, @raw_network_log, @potential_proxies)
+    INSERT INTO crawl_pages (audit_id, page_url, page_type, datalayer_events, ga4_requests, gtm_requests, consent_state, console_errors, screenshot_path, page_load_ms, dom_content_loaded_ms, raw_network_log, potential_proxies)
+    VALUES (@audit_id, @page_url, @page_type, @datalayer_events, @ga4_requests, @gtm_requests, @consent_state, @console_errors, @screenshot_path, @page_load_ms, @dom_content_loaded_ms, @raw_network_log, @potential_proxies)
   `);
   const result = stmt.run({
     datalayer_events: null,
@@ -220,6 +228,7 @@ export function insertCrawlPage(data: {
     console_errors: null,
     screenshot_path: null,
     page_load_ms: null,
+    dom_content_loaded_ms: null,
     raw_network_log: null,
     potential_proxies: null,
     ...data,

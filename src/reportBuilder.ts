@@ -387,7 +387,16 @@ function renderPagesSummary(crawlPages: any[]): string {
             return `<tr>
               <td><span class="page-type-badge">${escHtml(p.page_type)}</span></td>
               <td class="url-cell"><a href="${escHtml(p.page_url)}" target="_blank" rel="noopener" title="${escHtml(p.page_url)}">${escHtml(shortUrl)}</a></td>
-              <td>${p.page_load_ms >= 29000 ? (p.page_load_ms / 1000).toFixed(0) + 's+ (timeout)' : p.page_load_ms > 100 ? (p.page_load_ms / 1000).toFixed(1) + 's' : '<span style="color:#dc3545">Failed to load</span>'}</td>
+              <td>${(() => {
+                const dcl = (p as any).dom_content_loaded_ms || 0;
+                const total = p.page_load_ms || 0;
+                // Use DOMContentLoaded time if available and meaningful
+                const displayMs = dcl > 100 ? dcl : total;
+                if (displayMs <= 100) return '<span style="color:#dc3545">Failed to load</span>';
+                if (total >= 29000 && dcl > 100) return (dcl / 1000).toFixed(1) + 's';
+                if (total >= 29000) return total / 1000 + 's+ (timeout)';
+                return (displayMs / 1000).toFixed(1) + 's';
+              })()}</td>
               <td>${dl.length}</td>
               <td>${ga4.length}</td>
             </tr>`;

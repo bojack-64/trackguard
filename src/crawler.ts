@@ -8,7 +8,7 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
-import { insertCrawlPage, updateAuditStatus, AuditRow } from './database';
+import { insertCrawlPage, updateAuditStatus, getDb, AuditRow } from './database';
 
 // ─── Types for captured data ────────────────────────────────────────────────
 
@@ -46,6 +46,7 @@ export interface PageCrawlResult {
   consoleErrors: string[];
   screenshotPath: string | null;
   pageLoadMs: number;
+  domContentLoadedMs: number;
   rawNetworkLog: { url: string; method: string; status: number | null }[];
   potentialProxies: ProxyDetection[];
 }
@@ -196,11 +197,55 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
         consoleErrors: consentResult.errors,
         screenshotPath: consentResult.bannerScreenshot,
         pageLoadMs: 0,
+        domContentLoadedMs: 0,
         rawNetworkLog: [],
         potentialProxies: [],
       });
     } catch (consentErr) {
       console.error('[Crawler] Consent check failed:', consentErr);
+    }
+
+    // ── Step 2b: Re-take homepage screenshot AFTER consent banner is dismissed ──
+    // The Step 1 screenshot may have the consent banner overlaying the page.
+    // Now that consent has been handled, take a clean screenshot.
+    if (consentResult && consentResult.acceptButtonClicked) {
+      try {
+        const screenshotPage = await context.newPage();
+        try {
+          await screenshotPage.goto(audit.website_url, { waitUntil: 'networkidle', timeout: 20000 });
+        } catch (navErr) {
+          const msg = navErr instanceof Error ? navErr.message : '';
+          if (!msg.includes('Timeout') && !msg.includes('timeout')) throw navErr;
+        }
+        // Wait for any consent banner dismiss animations to complete
+        await screenshotPage.waitForTimeout(2000);
+        // Verify the consent banner is gone from the DOM
+        try {
+          for (const cmp of CMP_CONFIGS) {
+            for (const sel of cmp.bannerSelectors) {
+              const banner = await screenshotPage.$(sel);
+              if (banner && await banner.isVisible()) {
+                // Banner still visible — wait for it to disappear
+                await screenshotPage.waitForSelector(sel, { state: 'hidden', timeout: 3000 }).catch(() => {});
+              }
+            }
+          }
+        } catch { /* ignore — best effort */ }
+
+        const newScreenshot = await takeScreenshot(screenshotPage, audit.id, 'homepage');
+        await screenshotPage.close();
+
+        if (newScreenshot) {
+          // Update the homepage result's screenshot path
+          homepageResult.screenshotPath = newScreenshot;
+          // Update in DB — delete the old row and re-save with new screenshot
+          getDb().prepare('UPDATE crawl_pages SET screenshot_path = ? WHERE audit_id = ? AND page_type = ? AND page_url = ?')
+            .run(newScreenshot, audit.id, 'homepage', homepageResult.pageUrl);
+          console.log('[Crawler] Homepage screenshot retaken after consent dismissal');
+        }
+      } catch (ssErr) {
+        console.error('[Crawler] Failed to retake homepage screenshot:', ssErr);
+      }
     }
 
     // ── Step 3: Discover pages from homepage links ──
@@ -289,6 +334,7 @@ function saveCrawlResult(auditId: number, result: PageCrawlResult): void {
     console_errors: JSON.stringify(result.consoleErrors),
     screenshot_path: result.screenshotPath || undefined,
     page_load_ms: result.pageLoadMs,
+    dom_content_loaded_ms: result.domContentLoadedMs,
     raw_network_log: JSON.stringify(result.rawNetworkLog),
     potential_proxies: JSON.stringify(result.potentialProxies || []),
   });
@@ -1106,8 +1152,17 @@ async function crawlPage(
     // Strategy: try networkidle (best for analytics — waits for all tags to fire).
     // If it times out (heavy sites), fall back to domcontentloaded so we still
     // capture whatever has loaded. Either way, we proceed to extract data.
+    // We capture DOMContentLoaded timing separately — that's the meaningful
+    // "page load" time. networkidle timeout is NOT a real load time.
     const startTime = Date.now();
     let timedOut = false;
+    let domContentLoadedMs = 0;
+
+    // Listen for DOMContentLoaded to get the real page load time
+    page.on('domcontentloaded', () => {
+      domContentLoadedMs = Date.now() - startTime;
+    });
+
     try {
       await page.goto(url, {
         waitUntil: 'networkidle',
@@ -1127,6 +1182,10 @@ async function crawlPage(
       }
     }
     const pageLoadMs = Date.now() - startTime;
+    // If DOMContentLoaded didn't fire (DNS failure), keep it at 0
+    if (domContentLoadedMs === 0 && pageLoadMs > 0) {
+      domContentLoadedMs = pageLoadMs; // Fallback: use total time if DCL event wasn't captured
+    }
 
     // Wait for deferred analytics tags to fire.
     // Shorter wait if we already timed out (the page has had 30s+ already).
@@ -1209,6 +1268,7 @@ async function crawlPage(
       consoleErrors,
       screenshotPath,
       pageLoadMs,
+      domContentLoadedMs,
       rawNetworkLog,
       potentialProxies,
     };
@@ -1232,6 +1292,7 @@ async function crawlPage(
       consoleErrors: [...consoleErrors, `Page error: ${errMsg}`],
       screenshotPath,
       pageLoadMs: 0,
+      domContentLoadedMs: 0,
       rawNetworkLog,
       potentialProxies,
     };
