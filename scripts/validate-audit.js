@@ -220,8 +220,10 @@ addCheck(
   'GTM containers',
   gtmOnlyContainers.join(', '),
   reportGTMOnly.join(', '),
-  gtmOnlyContainers.length > 0 && gtmOnlyContainers.every(id => reportGTMSet.has(id))
-    ? 'PASS' : (reportGTMOnly.length > 0 ? 'WARN' : 'FAIL')
+  gtmOnlyContainers.length === 0 && reportGTMOnly.length === 0
+    ? 'PASS'
+    : gtmOnlyContainers.length > 0 && gtmOnlyContainers.every(id => reportGTMSet.has(id))
+      ? 'PASS' : (reportGTMOnly.length > 0 ? 'WARN' : 'FAIL')
 );
 
 // Measurement IDs: raw vs report mentions
@@ -239,7 +241,9 @@ addCheck(
   'Consent params',
   consentPage ? 'expected' : 'no consent page',
   reportConsentParams.length > 0 ? reportConsentParams.length + ' params' : '(none)',
-  !consentPage ? 'SKIP' : (reportConsentParams.length > 0 ? 'PASS' : 'FAIL')
+  !consentPage ? 'SKIP'
+    : (reportConsentParams.length > 0 ? 'PASS'
+      : (rawGA4RealTotal === 0 ? 'SKIP' : 'FAIL'))
 );
 
 // Proxy domains mentioned in report text

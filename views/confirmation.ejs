@@ -20,7 +20,9 @@
         <h1>Audit Request Submitted</h1>
         <p class="ref-id">Reference: <strong><%= audit.reference_id %></strong></p>
         <p>We've received your request to audit <strong><%= audit.website_url %></strong>.</p>
-        <p>We'll review the submission and run the tracking audit shortly. Keep your reference ID for your records.</p>
+        <p>We'll review the submission and run the tracking audit shortly. Your report will be available at:</p>
+        <p class="report-link"><a href="/report/<%= audit.reference_id %>">/report/<%= audit.reference_id %></a></p>
+        <p class="report-link-note">Bookmark this link — it will show your report once the audit is complete.</p>
 
         <div class="confirmation-details">
           <h3>Submission Summary</h3>

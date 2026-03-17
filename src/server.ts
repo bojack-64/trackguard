@@ -148,9 +148,21 @@ app.post('/admin/audit/:id/crawl', (req, res) => {
 
   // Respond immediately, run the crawl in the background
   res.redirect(`/admin/audit/${audit.id}`);
-  crawlSite(audit).then(({ consent }) => {
+  crawlSite(audit).then(({ pages, consent }) => {
     if (consent) consentCache.set(audit.id, consent);
-    console.log(`[Server] Crawl complete for audit ${audit.id}`);
+    // Check if the crawl was aborted due to site being unreachable
+    // (homepage failed fatally — only 1 page with 0ms load time and errors)
+    const realPages = pages.filter(p => p.pageType !== 'consent_check');
+    const allFailed = realPages.length <= 1 && realPages.every(p =>
+      p.pageLoadMs === 0 && p.ga4Requests.length === 0 && p.gtmRequests.length === 0
+      && p.dataLayerEvents.length === 0 && p.consoleErrors.some(e => e.startsWith('Page error:'))
+    );
+    if (allFailed) {
+      console.log(`[Server] Crawl aborted for audit ${audit.id} — site unreachable`);
+      updateAuditStatus(audit.id, 'crawl_failed');
+    } else {
+      console.log(`[Server] Crawl complete for audit ${audit.id}`);
+    }
   }).catch((err) => {
     console.error(`[Server] Crawl failed for audit ${audit.id}:`, err);
     updateAuditStatus(audit.id, 'error');

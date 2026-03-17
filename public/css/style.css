@@ -270,6 +270,32 @@ a:hover {
   color: #2E8B8B;
 }
 
+.report-link {
+  background: #f0f7f7;
+  border: 1px solid #2E8B8B;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 16px 0 8px;
+  font-family: monospace;
+  font-size: 1rem;
+}
+
+.report-link a {
+  color: #2E8B8B;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.report-link a:hover {
+  text-decoration: underline;
+}
+
+.report-link-note {
+  font-size: 0.85rem;
+  color: #666;
+  margin-bottom: 20px;
+}
+
 .confirmation-details {
   text-align: left;
   background: #f8f9fa;

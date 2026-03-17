@@ -71,6 +71,11 @@
                     </form>
                   <% } else if (audit.status === 'report_ready') { %>
                     <a href="/report/<%= audit.reference_id %>" class="btn btn-small" target="_blank">View Report</a>
+                  <% } else if (audit.status === 'crawl_failed') { %>
+                    <span class="text-muted" style="margin-right:4px;">Unreachable</span>
+                    <form action="/admin/audit/<%= audit.id %>/crawl" method="POST" style="display:inline">
+                      <button type="submit" class="btn btn-small btn-danger">Retry</button>
+                    </form>
                   <% } else if (audit.status === 'error') { %>
                     <form action="/admin/audit/<%= audit.id %>/crawl" method="POST" style="display:inline">
                       <button type="submit" class="btn btn-small btn-danger">Retry</button>

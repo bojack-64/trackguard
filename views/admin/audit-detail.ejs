@@ -62,6 +62,10 @@
             <span class="spinner"></span>
             <strong>Generating report...</strong> The AI is analysing crawl data and building your report. This typically takes 30–60 seconds. Refresh to check.
           </div>
+        <% } else if (audit.status === 'crawl_failed') { %>
+          <div class="status-message status-message--error">
+            <strong>Site unreachable.</strong> The crawler could not load the website. This usually means the domain doesn't resolve, the server is down, or the site is blocking automated access. Check the URL and try again.
+          </div>
         <% } else if (audit.status === 'error') { %>
           <div class="status-message status-message--error">
             <strong>Something went wrong.</strong> The crawl or report generation failed. You can retry below. If the problem persists, check the server logs.
@@ -69,7 +73,7 @@
         <% } %>
 
         <div class="action-buttons">
-          <% if (audit.status === 'pending' || audit.status === 'error') { %>
+          <% if (audit.status === 'pending' || audit.status === 'error' || audit.status === 'crawl_failed') { %>
             <form action="/admin/audit/<%= audit.id %>/crawl" method="POST" style="display:inline">
               <button type="submit" class="btn btn-primary"><%= audit.status === 'error' ? 'Retry Crawl' : 'Start Crawl' %></button>
             </form>

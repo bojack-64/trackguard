@@ -387,7 +387,7 @@ function renderPagesSummary(crawlPages: any[]): string {
             return `<tr>
               <td><span class="page-type-badge">${escHtml(p.page_type)}</span></td>
               <td class="url-cell"><a href="${escHtml(p.page_url)}" target="_blank" rel="noopener" title="${escHtml(p.page_url)}">${escHtml(shortUrl)}</a></td>
-              <td>${p.page_load_ms >= 29000 ? (p.page_load_ms / 1000).toFixed(0) + 's+ (timeout)' : p.page_load_ms > 0 ? (p.page_load_ms / 1000).toFixed(1) + 's' : '—'}</td>
+              <td>${p.page_load_ms >= 29000 ? (p.page_load_ms / 1000).toFixed(0) + 's+ (timeout)' : p.page_load_ms > 100 ? (p.page_load_ms / 1000).toFixed(1) + 's' : '<span style="color:#dc3545">Failed to load</span>'}</td>
               <td>${dl.length}</td>
               <td>${ga4.length}</td>
             </tr>`;
@@ -415,6 +415,17 @@ function renderScreenshot(screenshotRelPath: string, caption: string): string {
   const absolutePath = path.join(__dirname, '..', 'public', screenshotRelPath);
   try {
     if (fs.existsSync(absolutePath)) {
+      const stat = fs.statSync(absolutePath);
+      // Screenshots under 15KB are almost certainly blank/empty — show placeholder instead
+      if (stat.size < 15000) {
+        return `
+    <div class="screenshot-container screenshot-unavailable">
+      <div class="screenshot-placeholder">
+        <p>Screenshot unavailable — page did not render during crawl.</p>
+      </div>
+      <p class="screenshot-caption">${escHtml(caption)}</p>
+    </div>`;
+      }
       const imageBuffer = fs.readFileSync(absolutePath);
       const base64 = imageBuffer.toString('base64');
       const mimeType = screenshotRelPath.endsWith('.png') ? 'image/png' : 'image/jpeg';
@@ -425,12 +436,7 @@ function renderScreenshot(screenshotRelPath: string, caption: string): string {
     </div>`;
     }
   } catch { /* fall through to fallback */ }
-  // Fallback: relative path (works when served from the Express static server)
-  return `
-    <div class="screenshot-container">
-      <img src="/${escHtml(screenshotRelPath)}" alt="${escHtml(caption)}" class="screenshot" loading="lazy" />
-      <p class="screenshot-caption">${escHtml(caption)}</p>
-    </div>`;
+  return '';
 }
 
 function renderFooter(audit: AuditRow, totalIssues: number, criticalOrHigh: number): string {
@@ -751,6 +757,10 @@ function reportCSS(): string {
 
     /* Screenshots */
     .screenshot-container { margin: 20px 0; text-align: center; }
+    .screenshot-placeholder {
+      background: #f8f9fa; border: 2px dashed #ccc; border-radius: 8px;
+      padding: 40px 20px; color: #888; font-style: italic; font-size: 0.95rem;
+    }
     .screenshot {
       max-width: 100%;
       max-height: 600px;

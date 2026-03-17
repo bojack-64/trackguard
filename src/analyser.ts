@@ -75,6 +75,13 @@ IMPORTANT ANALYSIS GUIDELINES — read carefully:
 
 7. MISSING CONSENT BANNER WITH ACTIVE CONSENT STATE: If a CMP is detected in the dataLayer (e.g. OneTrust consent events, Cookiebot config) but no visible consent banner was shown, this is likely because the CMP is configured to auto-apply consent defaults without showing a banner in certain jurisdictions (e.g. a deny-all default in regions where that's sufficient). Do NOT flag this as "Missing consent banner" or "CMP not working." Instead note it as an observation: "CMP ([name]) detected in dataLayer with consent defaults applied, but no visible banner was shown during the crawl. This is likely jurisdiction-based banner suppression." Only flag it as an issue if consent defaults are set to granted (which could indicate misconfigured implied consent).
 
+9. ZERO-DATA SITES: If the crawl captured zero GA4 requests, zero GTM containers, AND zero dataLayer events across ALL pages, this site has no detectable Google analytics tracking. In this case:
+   - Set the health score to 0
+   - Do NOT generate positive findings. Do not manufacture positives like "no privacy violations" or "clean slate" — the absence of tracking is not a positive outcome for a business that needs analytics
+   - Issue a single critical finding: "No analytics tracking infrastructure detected"
+   - Keep the executive summary factual and brief
+   - Recommend a full analytics implementation review
+
 When analysing consent data, pay special attention to:
 - Whether consent defaults are set to denied (as required by GDPR)
 - Whether analytics tags fire BEFORE consent is granted (a compliance violation)

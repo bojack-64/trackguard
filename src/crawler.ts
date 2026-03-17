@@ -170,6 +170,19 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
     results.push(homepageResult);
     saveCrawlResult(audit.id, homepageResult);
 
+    // Check if homepage completely failed (DNS error, connection refused, etc.)
+    // crawlPage catches errors internally and returns a result with pageLoadMs=0
+    // and "Page error:" in consoleErrors. If so, abort — no point continuing.
+    const hasFatalError = homepageResult.pageLoadMs === 0
+      && homepageResult.consoleErrors.some(e => e.startsWith('Page error:')
+        && (e.includes('ERR_NAME_NOT_RESOLVED') || e.includes('ERR_CONNECTION_REFUSED')
+          || e.includes('ERR_CONNECTION_TIMED_OUT') || e.includes('ERR_ADDRESS_UNREACHABLE')
+          || e.includes('chrome-error://') || e.includes('ERR_FAILED')));
+    if (hasFatalError) {
+      console.log(`[Crawler] Crawl aborted for ${audit.website_url} — site unreachable`);
+      return { pages: results, consent: null };
+    }
+
     // ── Step 2: Consent interaction (homepage only) ──
     try {
       consentResult = await handleConsent(context, audit);
@@ -1044,7 +1057,10 @@ async function crawlPage(
           }
 
           // Signal 3: Non-Google domain with /collect endpoint and GA4-style path
-          if (pathLower.includes('/collect') && (params.has('tid') || params.has('v'))) {
+          // Must match actual collect endpoints, not paths like /collections/ or /cdn/shop/collect*
+          const isStaticAsset = /\.(jpg|jpeg|png|gif|webp|svg|ico|css|woff2?|ttf|eot|mp4|mp3)(\?|$)/i.test(respUrl);
+          const isCollectEndpoint = /\/(g\/)?collect(\?|$)/.test(pathLower);
+          if (!isStaticAsset && isCollectEndpoint && (params.has('tid') || (params.has('v') && params.get('v') === '2'))) {
             if (!seenProxyDomains.has(domain)) {
               seenProxyDomains.add(domain);
               potentialProxies.push({
