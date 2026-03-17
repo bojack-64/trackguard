@@ -166,28 +166,146 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
       }
     `);
 
-    // ── Step 1: Crawl homepage ──
-    const homepageResult = await crawlPage(context, audit, audit.website_url, 'homepage');
-    results.push(homepageResult);
-    saveCrawlResult(audit.id, homepageResult);
+    // ── Step 1: Crawl homepage (data only, no screenshot yet) ──
+    const homepageResult = await crawlPage(context, audit, audit.website_url, 'homepage', true /* skipScreenshot */);
 
     // Check if homepage completely failed (DNS error, connection refused, etc.)
-    // crawlPage catches errors internally and returns a result with pageLoadMs=0
-    // and "Page error:" in consoleErrors. If so, abort — no point continuing.
     const hasFatalError = homepageResult.pageLoadMs === 0
       && homepageResult.consoleErrors.some(e => e.startsWith('Page error:')
         && (e.includes('ERR_NAME_NOT_RESOLVED') || e.includes('ERR_CONNECTION_REFUSED')
           || e.includes('ERR_CONNECTION_TIMED_OUT') || e.includes('ERR_ADDRESS_UNREACHABLE')
           || e.includes('chrome-error://') || e.includes('ERR_FAILED')));
     if (hasFatalError) {
+      results.push(homepageResult);
+      saveCrawlResult(audit.id, homepageResult);
       console.log(`[Crawler] Crawl aborted for ${audit.website_url} — site unreachable`);
       return { pages: results, consent: null };
     }
 
-    // ── Step 2: Consent interaction (homepage only) ──
+    // ── Step 2: Consent + screenshot on a SINGLE page ──
+    // Navigate to homepage, handle consent banner, then take clean screenshot.
+    // All on the same page so the consent cookie persists and the banner is gone.
     try {
-      consentResult = await handleConsent(context, audit);
-      // Store consent data as a special crawl page entry
+      const homePage = await context.newPage();
+
+      // Inject dataLayer interceptor for consent tracking
+      await homePage.addInitScript(`
+        (function() {
+          var w = self;
+          w.__tg_dl = []; w.__tg_gtag = [];
+          var origDL = w.dataLayer || []; w.dataLayer = origDL;
+          var origPush = Array.prototype.push;
+          origDL.push = function() {
+            for (var j = 0; j < arguments.length; j++) {
+              try { w.__tg_dl.push({ timestamp: Date.now(), data: JSON.parse(JSON.stringify(arguments[j])) }); } catch(e) {}
+            }
+            return origPush.apply(this, arguments);
+          };
+        })();
+      `);
+
+      // Track post-consent GA4
+      const postConsentGA4: GA4Request[] = [];
+      homePage.on('response', (response) => {
+        const respUrl = response.url();
+        if (/\/(g\/collect|g\/s\/collect|ccm\/collect)/.test(respUrl)) {
+          postConsentGA4.push(parseGA4Request(respUrl));
+        }
+      });
+
+      try {
+        await homePage.goto(audit.website_url, { waitUntil: 'networkidle', timeout: 20000 });
+      } catch (navErr) {
+        const msg = navErr instanceof Error ? navErr.message : '';
+        if (!msg.includes('Timeout') && !msg.includes('timeout')) throw navErr;
+      }
+      await homePage.waitForTimeout(2000);
+
+      // Read default consent state
+      const defaultConsent = await readConsentState(homePage);
+
+      // Detect and handle consent banner — all on this same page
+      let bannerFound = false;
+      let acceptClicked = false;
+      let cmpName: string | null = null;
+      let bannerScreenshot: string | null = null;
+
+      for (const cmp of CMP_CONFIGS) {
+        for (const selector of cmp.bannerSelectors) {
+          try {
+            const banner = await homePage.$(selector);
+            if (banner && await banner.isVisible()) {
+              cmpName = cmp.name;
+              bannerFound = true;
+              console.log(`[Consent] Found ${cmp.name} banner: ${selector}`);
+
+              // Screenshot the banner element
+              bannerScreenshot = await takeElementScreenshot(homePage, banner, audit.id, 'consent-banner');
+
+              // Click Accept
+              for (const acceptSel of cmp.acceptSelectors) {
+                try {
+                  const btn = await homePage.$(acceptSel);
+                  if (btn && await btn.isVisible()) {
+                    postConsentGA4.length = 0;
+                    await homePage.evaluate('self.__tg_dl = [];');
+                    await btn.click();
+                    acceptClicked = true;
+                    console.log(`[Consent] Clicked "${acceptSel}" on ${cmp.name} banner`);
+
+                    // Wait for banner to disappear from DOM — poll every 500ms up to 5s
+                    for (let i = 0; i < 10; i++) {
+                      await homePage.waitForTimeout(500);
+                      const stillVisible = await homePage.$(selector).then(
+                        async el => el ? await el.isVisible().catch(() => false) : false
+                      ).catch(() => false);
+                      if (!stillVisible) {
+                        console.log(`[Consent] Banner disappeared after ${(i + 1) * 500}ms`);
+                        break;
+                      }
+                    }
+
+                    // Extra wait for post-consent tags
+                    await homePage.waitForTimeout(2000);
+                    break;
+                  }
+                } catch { /* try next selector */ }
+              }
+              break;
+            }
+          } catch { /* try next selector */ }
+        }
+        if (bannerFound) break;
+      }
+
+      if (!bannerFound) {
+        console.log('[Consent] No known CMP banner detected');
+      }
+
+      // Read post-consent state
+      const postConsent = acceptClicked ? await readConsentState(homePage) : null;
+      const postDL = acceptClicked ? await homePage.evaluate('self.__tg_dl || []') as DataLayerPush[] : [];
+
+      console.log(
+        `[Consent] CMP: ${cmpName || 'none'}, banner: ${bannerFound}, ` +
+        `accepted: ${acceptClicked}, post-consent GA4: ${postConsentGA4.length}`
+      );
+
+      // Build consent result
+      consentResult = {
+        cmpDetected: cmpName,
+        bannerFound,
+        bannerScreenshot,
+        defaultConsentState: defaultConsent,
+        acceptButtonFound: acceptClicked,
+        acceptButtonClicked: acceptClicked,
+        postConsentState: postConsent,
+        postConsentGA4Requests: [...postConsentGA4],
+        postConsentDataLayer: postDL,
+        errors: [],
+      };
+
+      // Save consent data
       saveCrawlResult(audit.id, {
         pageUrl: audit.website_url,
         pageType: 'consent_check',
@@ -201,52 +319,30 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
         rawNetworkLog: [],
         potentialProxies: [],
       });
+
+      // ── NOW take the homepage viewport screenshot ──
+      // Banner has been dismissed (or was never there), page shows clean content
+      console.log('[Crawler] Taking homepage screenshot (post-consent)');
+      homepageResult.screenshotPath = await takeScreenshot(homePage, audit.id, 'homepage');
+
+      await homePage.close();
     } catch (consentErr) {
-      console.error('[Crawler] Consent check failed:', consentErr);
-    }
-
-    // ── Step 2b: Re-take homepage screenshot AFTER consent banner is dismissed ──
-    // The Step 1 screenshot may have the consent banner overlaying the page.
-    // Now that consent has been handled, take a clean screenshot.
-    if (consentResult && consentResult.acceptButtonClicked) {
-      try {
-        const screenshotPage = await context.newPage();
+      console.error('[Crawler] Consent/screenshot failed:', consentErr);
+      // If consent handling failed, still take a screenshot via a quick page open
+      if (!homepageResult.screenshotPath) {
         try {
-          await screenshotPage.goto(audit.website_url, { waitUntil: 'networkidle', timeout: 20000 });
-        } catch (navErr) {
-          const msg = navErr instanceof Error ? navErr.message : '';
-          if (!msg.includes('Timeout') && !msg.includes('timeout')) throw navErr;
-        }
-        // Wait for any consent banner dismiss animations to complete
-        await screenshotPage.waitForTimeout(2000);
-        // Verify the consent banner is gone from the DOM
-        try {
-          for (const cmp of CMP_CONFIGS) {
-            for (const sel of cmp.bannerSelectors) {
-              const banner = await screenshotPage.$(sel);
-              if (banner && await banner.isVisible()) {
-                // Banner still visible — wait for it to disappear
-                await screenshotPage.waitForSelector(sel, { state: 'hidden', timeout: 3000 }).catch(() => {});
-              }
-            }
-          }
-        } catch { /* ignore — best effort */ }
-
-        const newScreenshot = await takeScreenshot(screenshotPage, audit.id, 'homepage');
-        await screenshotPage.close();
-
-        if (newScreenshot) {
-          // Update the homepage result's screenshot path
-          homepageResult.screenshotPath = newScreenshot;
-          // Update in DB — delete the old row and re-save with new screenshot
-          getDb().prepare('UPDATE crawl_pages SET screenshot_path = ? WHERE audit_id = ? AND page_type = ? AND page_url = ?')
-            .run(newScreenshot, audit.id, 'homepage', homepageResult.pageUrl);
-          console.log('[Crawler] Homepage screenshot retaken after consent dismissal');
-        }
-      } catch (ssErr) {
-        console.error('[Crawler] Failed to retake homepage screenshot:', ssErr);
+          const fallbackPage = await context.newPage();
+          await fallbackPage.goto(audit.website_url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+          await fallbackPage.waitForTimeout(2000);
+          homepageResult.screenshotPath = await takeScreenshot(fallbackPage, audit.id, 'homepage');
+          await fallbackPage.close();
+        } catch { /* no screenshot — that's ok */ }
       }
     }
+
+    // Save homepage result (with the post-consent screenshot)
+    results.push(homepageResult);
+    saveCrawlResult(audit.id, homepageResult);
 
     // ── Step 3: Discover pages from homepage links ──
     // We need the homepage page object for link extraction, but crawlPage
@@ -591,6 +687,11 @@ const CMP_CONFIGS = [
     name: 'hubspot',
     bannerSelectors: ['#hs-eu-cookie-confirmation', '#hs-banner-parent'],
     acceptSelectors: ['#hs-eu-confirmation-button', '#hs-eu-cookie-confirmation-accept'],
+  },
+  {
+    name: 'shopify',
+    bannerSelectors: ['#shopify-pc__banner', '.shopify-pc__banner__dialog'],
+    acceptSelectors: ['#shopify-pc__banner__btn-accept', '.shopify-pc__banner__btn-accept'],
   },
   {
     name: 'generic',
@@ -978,7 +1079,8 @@ async function crawlPage(
   context: BrowserContext,
   audit: AuditRow,
   url: string,
-  pageType: string
+  pageType: string,
+  skipScreenshot = false
 ): Promise<PageCrawlResult> {
   const page = await context.newPage();
   const dataLayerEvents: DataLayerPush[] = [];
@@ -1240,7 +1342,10 @@ async function crawlPage(
 
     // ── Screenshot ──
     // Taken AFTER DOM stabilisation and interstitial dismissal for best quality.
-    screenshotPath = await takeScreenshot(page, audit.id, pageType);
+    // For homepage, screenshot is deferred until after consent banner dismissal.
+    if (!skipScreenshot) {
+      screenshotPath = await takeScreenshot(page, audit.id, pageType);
+    }
 
     // Log proxy detections
     if (potentialProxies.length > 0) {
