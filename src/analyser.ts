@@ -96,10 +96,17 @@ IMPORTANT ANALYSIS GUIDELINES — read carefully:
    - Keep the executive summary factual and brief
    - Recommend a full analytics implementation review
 
+CRITICAL — TWO-PHASE CONSENT DATA:
+The crawl data includes SEPARATE pre-consent and post-consent captures:
+- "Pre-Consent GA4 Requests" = requests that fired BEFORE the user accepted cookies. If these show GCS=G100 or G111, it means analytics was firing with default-granted consent, which may be a GDPR compliance concern. However, G100 (only analytics_storage granted) is often acceptable as a default for non-EU sites.
+- "Post-Consent GA4 Requests" = requests that fired AFTER the user clicked Accept. GCS values here should show G111 (all granted) which is correct post-consent behaviour — do NOT flag this as a violation.
+- The per-page GA4 data (in the Pages Audited section) contains ONLY post-consent requests. This is correct — it represents what a real user experiences after accepting cookies.
+- When assessing consent compliance, compare the PRE-consent GCS values to the POST-consent GCS values. The expected pattern is: pre-consent shows denied/restricted defaults, post-consent shows granted.
+
 When analysing consent data, pay special attention to:
-- Whether consent defaults are set to denied (as required by GDPR)
-- Whether analytics tags fire BEFORE consent is granted (a compliance violation)
-- Whether the consent state changes correctly after the user accepts
+- Whether consent defaults are set to denied (as required by GDPR) — check the PRE-consent data
+- Whether analytics tags fire BEFORE consent is granted (check pre-consent GA4 request count — some is acceptable if GCS shows restricted consent, but full tracking with G111 before consent is a violation)
+- Whether the consent state changes correctly after the user accepts — compare pre vs post states
 - Whether all GA4 consent mode v2 parameters are implemented (ad_storage, analytics_storage, ad_user_data, ad_personalization)
 - Whether tags that should be gated behind consent are actually gated
 
@@ -409,7 +416,17 @@ ${consentData.postConsentState
       .join('\n')
   : 'No post-consent state detected'}
 
-### GA4 Requests That Fired After Consent Was Granted
+### Pre-Consent GA4 Requests (fired BEFORE user accepted cookies)
+${(consentData.preConsentGA4Requests || []).length > 0
+  ? (consentData.preConsentGA4Requests || [])
+      .map(r => {
+        const parsed = parseGA4CollectUrl(r.url || '');
+        return `- Event: ${parsed.event_name} | Measurement ID: ${r.measurement_id || parsed.measurement_id || 'unknown'} | GCS: ${parsed.gcs || 'not present'} | Page: ${parsed.page_location || 'unknown'}`;
+      })
+      .join('\n')
+  : 'No GA4 requests fired before consent was granted'}
+
+### Post-Consent GA4 Requests (fired AFTER user clicked Accept)
 ${(consentData.postConsentGA4Requests || []).length > 0
   ? (consentData.postConsentGA4Requests || [])
       .map(r => {
@@ -451,15 +468,12 @@ The crawl detected consent state values in the dataLayer (see above) but NO visi
     // Enriched GA4 request parsing
     const parsedGA4 = ga4Reqs.map((r: any) => parseGA4CollectUrl(r.url || ''));
 
-    // Use DOMContentLoaded time (dcl_ms) if available, fall back to page_load_ms
+    // Send ONLY the DOMContentLoaded time to the AI.
+    // Do NOT send networkidle timeout — it's misleading and the AI references it.
     const dclMs = page.dom_content_loaded_ms || 0;
-    const loadMs = dclMs > 0 ? dclMs : (page.page_load_ms || 0);
-    const isTimeout = (page.page_load_ms || 0) >= 29000;
-    const loadTimeDisplay = loadMs === 0 || loadMs < 100
+    const loadTimeDisplay = dclMs === 0 || dclMs < 100
       ? 'Failed to load'
-      : isTimeout && dclMs === 0
-        ? `${((page.page_load_ms || 0) / 1000).toFixed(1)}s+ (networkidle timeout — page was still loading)`
-        : `${loadMs}ms (DOMContentLoaded)`;
+      : `${dclMs}ms`;
 
     sections.push(`### Page: ${page.page_type} — ${page.page_url}
 - Load time: ${loadTimeDisplay}

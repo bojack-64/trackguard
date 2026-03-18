@@ -61,6 +61,8 @@ export interface ConsentResult {
   postConsentState: Record<string, string> | null;
   postConsentGA4Requests: GA4Request[];
   postConsentDataLayer: DataLayerPush[];
+  preConsentGA4Requests: GA4Request[];
+  preConsentDataLayer: DataLayerPush[];
   errors: string[];
 }
 
@@ -343,11 +345,19 @@ async function crawlHomepageWithConsent(
   // ── Read DEFAULT consent state (BEFORE accepting) ──
   const defaultConsent = await readConsentState(page);
 
+  // ── Snapshot pre-consent GA4 requests ──
+  // Everything captured so far is pre-consent (page loaded, no user interaction)
+  const preConsentGA4Count = ga4Requests.length;
+  const preConsentGA4 = [...ga4Requests]; // copy for consent result
+  const preConsentDL = await page.evaluate('JSON.parse(JSON.stringify(self.__tg_dl || []))') as DataLayerPush[];
+  console.log(`[Consent] Pre-consent state: ${preConsentGA4Count} GA4 requests, ${preConsentDL.length} dataLayer events`);
+
   // ── Detect and handle consent banner — all on THIS page ──
   let bannerFound = false;
   let acceptClicked = false;
   let cmpName: string | null = null;
   let bannerScreenshot: string | null = null;
+  let consentClickTimestamp = 0;
 
   for (const cmp of CMP_CONFIGS) {
     for (const selector of cmp.bannerSelectors) {
@@ -366,6 +376,7 @@ async function crawlHomepageWithConsent(
             try {
               const btn = await page.$(acceptSel);
               if (btn && await btn.isVisible()) {
+                consentClickTimestamp = Date.now();
                 await btn.click();
                 acceptClicked = true;
                 console.log(`[Consent] Clicked "${acceptSel}" on ${cmp.name} banner`);
@@ -396,35 +407,43 @@ async function crawlHomepageWithConsent(
     if (bannerFound) break;
   }
 
-  // Also try dismissing generic interstitials (age gates, location selectors)
+  // Also try dismissing generic interstitials (age gates, location selectors, popups)
+  // Do this AFTER consent banner so the consent banner gets priority
+  try {
+    const dismissed = await dismissInterstitials(page);
+    if (dismissed) {
+      await page.waitForTimeout(1500);
+    }
+  } catch { /* not critical */ }
+
   if (!bannerFound) {
-    try {
-      const dismissed = await dismissInterstitials(page);
-      if (dismissed) {
-        await page.waitForTimeout(1500);
-      }
-    } catch { /* not critical */ }
     console.log('[Consent] No known CMP banner detected');
   }
 
   // ── Read POST-CONSENT state ──
   const postConsent = acceptClicked ? await readConsentState(page) : null;
 
-  // Capture post-consent GA4 requests (separate from the running total)
-  // For the consent result, we track which GA4 requests fired after the click.
-  // Since our listeners have been running the whole time, we use the full ga4Requests
-  // array — this represents the post-consent state since consent was accepted on this page.
-  const postConsentGA4 = acceptClicked ? [...ga4Requests] : [];
-  const postConsentDL = acceptClicked
-    ? await page.evaluate('self.__tg_dl || []') as DataLayerPush[]
-    : [];
+  // ── Split GA4 requests into pre-consent and post-consent ──
+  // Pre-consent: captured before the consent click
+  // Post-consent: captured after the consent click (new requests only)
+  let postConsentGA4: GA4Request[] = [];
+  let postConsentDL: DataLayerPush[] = [];
+
+  if (acceptClicked && consentClickTimestamp > 0) {
+    // Post-consent GA4 = requests with timestamps AFTER the click
+    postConsentGA4 = ga4Requests.filter(r => r.timestamp > consentClickTimestamp);
+    // Post-consent dataLayer = events with timestamps AFTER the click
+    const allDL = await page.evaluate('JSON.parse(JSON.stringify(self.__tg_dl || []))') as DataLayerPush[];
+    postConsentDL = allDL.filter(e => e.timestamp > consentClickTimestamp);
+    console.log(`[Consent] Post-consent: ${postConsentGA4.length} new GA4 requests, ${postConsentDL.length} new dataLayer events`);
+  }
 
   console.log(
     `[Consent] CMP: ${cmpName || 'none'}, banner: ${bannerFound}, ` +
     `accepted: ${acceptClicked}, post-consent GA4: ${postConsentGA4.length}`
   );
 
-  // Build consent result
+  // Build consent result with BOTH pre and post data
   consentResult = {
     cmpDetected: cmpName,
     bannerFound,
@@ -435,11 +454,25 @@ async function crawlHomepageWithConsent(
     postConsentState: postConsent,
     postConsentGA4Requests: postConsentGA4,
     postConsentDataLayer: postConsentDL,
+    preConsentGA4Requests: preConsentGA4,
+    preConsentDataLayer: preConsentDL,
     errors: [],
   };
 
   // ── NOW extract ALL page data (post-consent) ──
   await extractPageData(page, dataLayerEvents);
+
+  // ── For the HOMEPAGE result, only include post-consent GA4 requests ──
+  // Pre-consent requests go into the consent result above.
+  // If no consent was clicked, all requests are "post-consent" (no gating).
+  if (acceptClicked && consentClickTimestamp > 0) {
+    // Remove pre-consent requests from the homepage GA4 array
+    // ga4Requests was mutated by the listener, so we filter in place
+    const postConsentOnly = ga4Requests.filter(r => r.timestamp > consentClickTimestamp);
+    ga4Requests.length = 0;
+    postConsentOnly.forEach(r => ga4Requests.push(r));
+    console.log(`[Crawler] Homepage GA4 filtered to ${ga4Requests.length} post-consent requests (removed ${preConsentGA4Count} pre-consent)`);
+  }
 
   // ── Take viewport screenshot — banner is gone, page is clean ──
   console.log('[Crawler] Taking homepage screenshot (post-consent, banner dismissed)');
@@ -1030,6 +1063,8 @@ async function handleConsent(
     postConsentState: null,
     postConsentGA4Requests: [],
     postConsentDataLayer: [],
+    preConsentGA4Requests: [],
+    preConsentDataLayer: [],
     errors: [],
   };
 
@@ -1266,9 +1301,12 @@ async function dismissInterstitials(page: Page): Promise<boolean> {
     '[class*="age-verify"] button',
 
     // Shopify-specific popups (country selector, newsletter, shipping notice)
+    '[data-testid="geofencing-modal"] button:first-of-type', // Allbirds "Where are we shipping to?" X button
+    '[data-section-type="geofencing"] button:first-of-type',
     '[class*="country-selector"] [class*="close"]',
     '[class*="country-selector"] button[class*="dismiss"]',
     '[class*="shipping"] [class*="close"]',
+    '[class*="shipping-modal"] [class*="close"]',
     '[class*="announcement"] [class*="close"]',
     'form[class*="newsletter"] [class*="close"]',
     '[class*="newsletter-popup"] [class*="close"]',
