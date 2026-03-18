@@ -115,11 +115,377 @@ function parseGA4Request(url: string): GA4Request {
   }
 }
 
+// ─── Homepage + Consent combined crawl ──────────────────────────────────────
+
+/**
+ * Option C: Crawl homepage and handle consent on a SINGLE page.
+ * Flow: navigate → read default consent → detect banner → screenshot banner →
+ * click accept → wait for banner to disappear → wait for post-consent tracking →
+ * read post-consent state → extract ALL data (post-consent) → take viewport screenshot.
+ *
+ * This matches real user behaviour: land, accept cookies, then everything fires.
+ */
+async function crawlHomepageWithConsent(
+  context: BrowserContext,
+  audit: AuditRow
+): Promise<{ homepage: PageCrawlResult; consent: ConsentResult | null }> {
+  const page = await context.newPage();
+  const dataLayerEvents: DataLayerPush[] = [];
+  const ga4Requests: GA4Request[] = [];
+  const gtmRequests: GTMRequest[] = [];
+  const consoleErrors: string[] = [];
+  const rawNetworkLog: { url: string; method: string; status: number | null }[] = [];
+  const potentialProxies: ProxyDetection[] = [];
+  const seenProxyDomains = new Set<string>();
+  let screenshotPath: string | null = null;
+  let consentResult: ConsentResult | null = null;
+
+  // ── Inject dataLayer + gtag interceptor BEFORE page load ──
+  await page.addInitScript(`
+    (function() {
+      var w = self;
+      w.__tg_dl = [];
+      w.__tg_gtag = [];
+
+      var origDL = w.dataLayer || [];
+      w.dataLayer = origDL;
+
+      for (var i = 0; i < origDL.length; i++) {
+        try {
+          w.__tg_dl.push({ timestamp: Date.now(), data: JSON.parse(JSON.stringify(origDL[i])) });
+        } catch(e) {}
+      }
+
+      var origPush = Array.prototype.push;
+      origDL.push = function() {
+        for (var j = 0; j < arguments.length; j++) {
+          try {
+            w.__tg_dl.push({ timestamp: Date.now(), data: JSON.parse(JSON.stringify(arguments[j])) });
+          } catch(e) {}
+        }
+        return origPush.apply(this, arguments);
+      };
+
+      var origGtag = w.gtag;
+      w.gtag = function() {
+        try {
+          w.__tg_gtag.push({ timestamp: Date.now(), args: JSON.parse(JSON.stringify(Array.from(arguments))) });
+        } catch(e) {}
+        if (typeof origGtag === 'function') {
+          return origGtag.apply(this, arguments);
+        }
+      };
+    })();
+  `);
+
+  // ── Capture network requests (runs for entire page lifetime) ──
+  page.on('response', (response) => {
+    const respUrl = response.url();
+    const status = response.status();
+    const method = response.request().method();
+
+    // GA4 collect requests
+    if (
+      respUrl.includes('/g/collect') ||
+      respUrl.includes('/g/s/collect') ||
+      respUrl.includes('/ccm/collect')
+    ) {
+      ga4Requests.push(parseGA4Request(respUrl));
+    }
+
+    // GTM container loads
+    if (
+      respUrl.includes('googletagmanager.com/gtm.js') ||
+      respUrl.includes('googletagmanager.com/gtag/js')
+    ) {
+      const containerMatch = respUrl.match(/[?&]id=(GTM-[A-Z0-9]+|G-[A-Z0-9]+)/);
+      gtmRequests.push({
+        url: respUrl.substring(0, 300),
+        container_id: containerMatch ? containerMatch[1] : null,
+        timestamp: Date.now(),
+      });
+    }
+
+    // ── Detect potential GA4 first-party proxies ──
+    try {
+      const parsedUrl = new URL(respUrl);
+      const domain = parsedUrl.hostname;
+      const isGoogleDomain = domain.endsWith('google.com') || domain.endsWith('google-analytics.com')
+        || domain.endsWith('googletagmanager.com') || domain.endsWith('googleapis.com')
+        || domain.endsWith('gstatic.com') || domain.endsWith('doubleclick.net');
+
+      if (!isGoogleDomain && !seenProxyDomains.has(domain)) {
+        const pathLower = parsedUrl.pathname.toLowerCase();
+        const contentType = response.headers()['content-type'] || '';
+
+        // Signal 1: Non-Google script with GA4/analytics keywords
+        if (contentType.includes('javascript') || pathLower.endsWith('.js')) {
+          const ga4ScriptPatterns = [
+            /ga4/i, /gtag/i, /analytics[_-]?wrapper/i, /measurement/i,
+            /google[_-]?tag/i, /g[_-]?collect/i,
+          ];
+          if (ga4ScriptPatterns.some(p => p.test(pathLower))) {
+            seenProxyDomains.add(domain);
+            potentialProxies.push({ domain, reason: 'ga4_script', url: respUrl.substring(0, 300) });
+          }
+        }
+
+        // Signal 2: Non-Google endpoint with GA4 payload parameters
+        const params = parsedUrl.searchParams;
+        if (params.get('v') === '2' && params.has('tid') && params.has('en')) {
+          seenProxyDomains.add(domain);
+          potentialProxies.push({ domain, reason: 'ga4_payload', url: respUrl.substring(0, 300) });
+        }
+
+        // Signal 3: Non-Google domain with /collect endpoint (exclude static assets)
+        const isStaticAsset = /\.(jpg|jpeg|png|gif|webp|svg|ico|css|woff2?|ttf|eot|mp4|mp3)(\?|$)/i.test(respUrl);
+        const isCollectEndpoint = /\/(g\/)?collect(\?|$)/.test(pathLower);
+        if (!isStaticAsset && isCollectEndpoint && (params.has('tid') || (params.has('v') && params.get('v') === '2'))) {
+          if (!seenProxyDomains.has(domain)) {
+            seenProxyDomains.add(domain);
+            potentialProxies.push({ domain, reason: 'collect_endpoint', url: respUrl.substring(0, 300) });
+          }
+        }
+      }
+    } catch { /* URL parsing failed */ }
+
+    // Keep a filtered network log
+    if (
+      respUrl.includes('google') || respUrl.includes('analytics') ||
+      respUrl.includes('gtm') || respUrl.includes('gtag') ||
+      respUrl.includes('collect') || respUrl.includes('cookie') ||
+      respUrl.includes('consent')
+    ) {
+      rawNetworkLog.push({ url: respUrl.substring(0, 500), method, status });
+    }
+  });
+
+  // ── Capture console errors ──
+  const analyticsKeywords = ['ga4', 'gtag', 'gtm', 'analytics', 'consent', 'cookie', 'tracking', 'datalayer'];
+  page.on('console', (msg) => {
+    if (msg.type() === 'error' || msg.type() === 'warning') {
+      const text = msg.text().toLowerCase();
+      if (analyticsKeywords.some((kw) => text.includes(kw))) {
+        consoleErrors.push(`[${msg.type()}] ${msg.text().substring(0, 500)}`);
+      }
+    }
+  });
+
+  // ── Navigate to homepage ──
+  const startTime = Date.now();
+  let timedOut = false;
+  let domContentLoadedMs = 0;
+
+  page.on('domcontentloaded', () => {
+    domContentLoadedMs = Date.now() - startTime;
+  });
+
+  try {
+    await page.goto(audit.website_url, { waitUntil: 'networkidle', timeout: 30000 });
+  } catch (navError) {
+    const msg = navError instanceof Error ? navError.message : String(navError);
+    if (msg.includes('Timeout') || msg.includes('timeout')) {
+      timedOut = true;
+      console.log(`[Crawler] networkidle timeout on homepage — continuing with partial data`);
+      consoleErrors.push('Navigation: networkidle timed out after 30s, data captured is partial');
+    } else {
+      // Fatal navigation error — return error result
+      const errMsg = navError instanceof Error ? navError.message : String(navError);
+      console.error(`[Crawler] Homepage navigation failed: ${errMsg}`);
+      await page.close();
+      return {
+        homepage: {
+          pageUrl: audit.website_url,
+          pageType: 'homepage',
+          dataLayerEvents: [],
+          ga4Requests: [],
+          gtmRequests: [],
+          consoleErrors: [`Page error: ${errMsg}`],
+          screenshotPath: null,
+          pageLoadMs: 0,
+          domContentLoadedMs: 0,
+          rawNetworkLog: [],
+          potentialProxies: [],
+        },
+        consent: null,
+      };
+    }
+  }
+  const pageLoadMs = Date.now() - startTime;
+  if (domContentLoadedMs === 0 && pageLoadMs > 0) {
+    domContentLoadedMs = pageLoadMs;
+  }
+
+  // Wait for deferred analytics and SPA rendering
+  await page.waitForTimeout(timedOut ? 2000 : 3000);
+
+  // ── Diagnostic logging ──
+  const finalUrl = page.url();
+  const pageTitle = await page.title().catch(() => '(could not read title)');
+  console.log(`[Crawler] Homepage loaded: ${finalUrl} — "${pageTitle}"`);
+  if (finalUrl !== audit.website_url) {
+    consoleErrors.push(`Redirect: ${audit.website_url} → ${finalUrl}`);
+  }
+
+  // ── Wait for DOM stability (SPA rendering) ──
+  try {
+    await page.waitForFunction(`
+      (function() {
+        var body = document.body;
+        if (!body) return false;
+        return body.children.length > 5 && body.scrollHeight > 500;
+      })()
+    `, { timeout: 8000 });
+  } catch {
+    console.log('[Crawler] DOM stabilisation timeout on homepage');
+  }
+
+  // ── Read DEFAULT consent state (BEFORE accepting) ──
+  const defaultConsent = await readConsentState(page);
+
+  // ── Detect and handle consent banner — all on THIS page ──
+  let bannerFound = false;
+  let acceptClicked = false;
+  let cmpName: string | null = null;
+  let bannerScreenshot: string | null = null;
+
+  for (const cmp of CMP_CONFIGS) {
+    for (const selector of cmp.bannerSelectors) {
+      try {
+        const banner = await page.$(selector);
+        if (banner && await banner.isVisible()) {
+          cmpName = cmp.name;
+          bannerFound = true;
+          console.log(`[Consent] Found ${cmp.name} banner: ${selector}`);
+
+          // Screenshot the banner element
+          bannerScreenshot = await takeElementScreenshot(page, banner, audit.id, 'consent-banner');
+
+          // Click Accept
+          for (const acceptSel of cmp.acceptSelectors) {
+            try {
+              const btn = await page.$(acceptSel);
+              if (btn && await btn.isVisible()) {
+                await btn.click();
+                acceptClicked = true;
+                console.log(`[Consent] Clicked "${acceptSel}" on ${cmp.name} banner`);
+
+                // Wait for banner to ACTUALLY disappear from DOM
+                // Poll every 500ms for up to 5 seconds
+                for (let i = 0; i < 10; i++) {
+                  await page.waitForTimeout(500);
+                  const stillVisible = await page.$(selector).then(
+                    async el => el ? await el.isVisible().catch(() => false) : false
+                  ).catch(() => false);
+                  if (!stillVisible) {
+                    console.log(`[Consent] Banner disappeared after ${(i + 1) * 500}ms`);
+                    break;
+                  }
+                }
+
+                // Wait for post-consent tags to fire
+                await page.waitForTimeout(3000);
+                break;
+              }
+            } catch { /* try next selector */ }
+          }
+          break;
+        }
+      } catch { /* try next selector */ }
+    }
+    if (bannerFound) break;
+  }
+
+  // Also try dismissing generic interstitials (age gates, location selectors)
+  if (!bannerFound) {
+    try {
+      const dismissed = await dismissInterstitials(page);
+      if (dismissed) {
+        await page.waitForTimeout(1500);
+      }
+    } catch { /* not critical */ }
+    console.log('[Consent] No known CMP banner detected');
+  }
+
+  // ── Read POST-CONSENT state ──
+  const postConsent = acceptClicked ? await readConsentState(page) : null;
+
+  // Capture post-consent GA4 requests (separate from the running total)
+  // For the consent result, we track which GA4 requests fired after the click.
+  // Since our listeners have been running the whole time, we use the full ga4Requests
+  // array — this represents the post-consent state since consent was accepted on this page.
+  const postConsentGA4 = acceptClicked ? [...ga4Requests] : [];
+  const postConsentDL = acceptClicked
+    ? await page.evaluate('self.__tg_dl || []') as DataLayerPush[]
+    : [];
+
+  console.log(
+    `[Consent] CMP: ${cmpName || 'none'}, banner: ${bannerFound}, ` +
+    `accepted: ${acceptClicked}, post-consent GA4: ${postConsentGA4.length}`
+  );
+
+  // Build consent result
+  consentResult = {
+    cmpDetected: cmpName,
+    bannerFound,
+    bannerScreenshot,
+    defaultConsentState: defaultConsent,
+    acceptButtonFound: acceptClicked,
+    acceptButtonClicked: acceptClicked,
+    postConsentState: postConsent,
+    postConsentGA4Requests: postConsentGA4,
+    postConsentDataLayer: postConsentDL,
+    errors: [],
+  };
+
+  // ── NOW extract ALL page data (post-consent) ──
+  await extractPageData(page, dataLayerEvents);
+
+  // ── Take viewport screenshot — banner is gone, page is clean ──
+  console.log('[Crawler] Taking homepage screenshot (post-consent, banner dismissed)');
+  screenshotPath = await takeScreenshot(page, audit.id, 'homepage');
+
+  // Log proxy detections
+  if (potentialProxies.length > 0) {
+    console.log('[Crawler] Potential GA4 proxies detected on homepage:');
+    for (const p of potentialProxies) {
+      console.log(`  ${p.domain} (${p.reason}): ${p.url}`);
+    }
+  }
+
+  console.log(
+    `[Crawler] Homepage done (post-consent) — ` +
+    `${dataLayerEvents.length} dataLayer events, ` +
+    `${ga4Requests.length} GA4 requests, ` +
+    `${gtmRequests.length} GTM loads, ` +
+    `${pageLoadMs}ms load time`
+  );
+
+  await page.close();
+
+  return {
+    homepage: {
+      pageUrl: audit.website_url,
+      pageType: 'homepage',
+      dataLayerEvents,
+      ga4Requests,
+      gtmRequests,
+      consoleErrors,
+      screenshotPath,
+      pageLoadMs,
+      domContentLoadedMs,
+      rawNetworkLog,
+      potentialProxies,
+    },
+    consent: consentResult,
+  };
+}
+
 // ─── Main crawl function ────────────────────────────────────────────────────
 
 /**
- * Crawl a website: homepage first, consent check, then discover and crawl
- * up to 7 more high-value pages (product, category, cart, contact, etc.).
+ * Crawl a website: homepage first (with consent on same page), then discover
+ * and crawl up to 7 more high-value pages.
  * Returns page results + consent result.
  */
 export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResult[]; consent: ConsentResult | null }> {
@@ -166,146 +532,28 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
       }
     `);
 
-    // ── Step 1: Crawl homepage (data only, no screenshot yet) ──
-    const homepageResult = await crawlPage(context, audit, audit.website_url, 'homepage', true /* skipScreenshot */);
+    // ── Steps 1+2 combined: Homepage + Consent on ONE page ──
+    // Option C: Land on homepage, accept consent, THEN capture all data.
+    // This matches real user behaviour and ensures homepage data is post-consent.
+    const homepageResult = await crawlHomepageWithConsent(context, audit);
 
     // Check if homepage completely failed (DNS error, connection refused, etc.)
-    const hasFatalError = homepageResult.pageLoadMs === 0
-      && homepageResult.consoleErrors.some(e => e.startsWith('Page error:')
+    const hasFatalError = homepageResult.homepage.pageLoadMs === 0
+      && homepageResult.homepage.consoleErrors.some(e => e.startsWith('Page error:')
         && (e.includes('ERR_NAME_NOT_RESOLVED') || e.includes('ERR_CONNECTION_REFUSED')
           || e.includes('ERR_CONNECTION_TIMED_OUT') || e.includes('ERR_ADDRESS_UNREACHABLE')
           || e.includes('chrome-error://') || e.includes('ERR_FAILED')));
     if (hasFatalError) {
-      results.push(homepageResult);
-      saveCrawlResult(audit.id, homepageResult);
+      results.push(homepageResult.homepage);
+      saveCrawlResult(audit.id, homepageResult.homepage);
       console.log(`[Crawler] Crawl aborted for ${audit.website_url} — site unreachable`);
       return { pages: results, consent: null };
     }
 
-    // ── Step 2: Consent + screenshot on a SINGLE page ──
-    // Navigate to homepage, handle consent banner, then take clean screenshot.
-    // All on the same page so the consent cookie persists and the banner is gone.
-    try {
-      const homePage = await context.newPage();
+    consentResult = homepageResult.consent;
 
-      // Inject dataLayer interceptor for consent tracking
-      await homePage.addInitScript(`
-        (function() {
-          var w = self;
-          w.__tg_dl = []; w.__tg_gtag = [];
-          var origDL = w.dataLayer || []; w.dataLayer = origDL;
-          var origPush = Array.prototype.push;
-          origDL.push = function() {
-            for (var j = 0; j < arguments.length; j++) {
-              try { w.__tg_dl.push({ timestamp: Date.now(), data: JSON.parse(JSON.stringify(arguments[j])) }); } catch(e) {}
-            }
-            return origPush.apply(this, arguments);
-          };
-        })();
-      `);
-
-      // Track post-consent GA4
-      const postConsentGA4: GA4Request[] = [];
-      homePage.on('response', (response) => {
-        const respUrl = response.url();
-        if (/\/(g\/collect|g\/s\/collect|ccm\/collect)/.test(respUrl)) {
-          postConsentGA4.push(parseGA4Request(respUrl));
-        }
-      });
-
-      try {
-        await homePage.goto(audit.website_url, { waitUntil: 'networkidle', timeout: 20000 });
-      } catch (navErr) {
-        const msg = navErr instanceof Error ? navErr.message : '';
-        if (!msg.includes('Timeout') && !msg.includes('timeout')) throw navErr;
-      }
-      await homePage.waitForTimeout(2000);
-
-      // Read default consent state
-      const defaultConsent = await readConsentState(homePage);
-
-      // Detect and handle consent banner — all on this same page
-      let bannerFound = false;
-      let acceptClicked = false;
-      let cmpName: string | null = null;
-      let bannerScreenshot: string | null = null;
-
-      for (const cmp of CMP_CONFIGS) {
-        for (const selector of cmp.bannerSelectors) {
-          try {
-            const banner = await homePage.$(selector);
-            if (banner && await banner.isVisible()) {
-              cmpName = cmp.name;
-              bannerFound = true;
-              console.log(`[Consent] Found ${cmp.name} banner: ${selector}`);
-
-              // Screenshot the banner element
-              bannerScreenshot = await takeElementScreenshot(homePage, banner, audit.id, 'consent-banner');
-
-              // Click Accept
-              for (const acceptSel of cmp.acceptSelectors) {
-                try {
-                  const btn = await homePage.$(acceptSel);
-                  if (btn && await btn.isVisible()) {
-                    postConsentGA4.length = 0;
-                    await homePage.evaluate('self.__tg_dl = [];');
-                    await btn.click();
-                    acceptClicked = true;
-                    console.log(`[Consent] Clicked "${acceptSel}" on ${cmp.name} banner`);
-
-                    // Wait for banner to disappear from DOM — poll every 500ms up to 5s
-                    for (let i = 0; i < 10; i++) {
-                      await homePage.waitForTimeout(500);
-                      const stillVisible = await homePage.$(selector).then(
-                        async el => el ? await el.isVisible().catch(() => false) : false
-                      ).catch(() => false);
-                      if (!stillVisible) {
-                        console.log(`[Consent] Banner disappeared after ${(i + 1) * 500}ms`);
-                        break;
-                      }
-                    }
-
-                    // Extra wait for post-consent tags
-                    await homePage.waitForTimeout(2000);
-                    break;
-                  }
-                } catch { /* try next selector */ }
-              }
-              break;
-            }
-          } catch { /* try next selector */ }
-        }
-        if (bannerFound) break;
-      }
-
-      if (!bannerFound) {
-        console.log('[Consent] No known CMP banner detected');
-      }
-
-      // Read post-consent state
-      const postConsent = acceptClicked ? await readConsentState(homePage) : null;
-      const postDL = acceptClicked ? await homePage.evaluate('self.__tg_dl || []') as DataLayerPush[] : [];
-
-      console.log(
-        `[Consent] CMP: ${cmpName || 'none'}, banner: ${bannerFound}, ` +
-        `accepted: ${acceptClicked}, post-consent GA4: ${postConsentGA4.length}`
-      );
-
-      // Build consent result
-      consentResult = {
-        cmpDetected: cmpName,
-        bannerFound,
-        bannerScreenshot,
-        defaultConsentState: defaultConsent,
-        acceptButtonFound: acceptClicked,
-        acceptButtonClicked: acceptClicked,
-        postConsentState: postConsent,
-        postConsentGA4Requests: [...postConsentGA4],
-        postConsentDataLayer: postDL,
-        errors: [],
-      };
-
-      // Save consent data
+    // Save consent data as a separate row
+    if (consentResult) {
       saveCrawlResult(audit.id, {
         pageUrl: audit.website_url,
         pageType: 'consent_check',
@@ -319,30 +567,11 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
         rawNetworkLog: [],
         potentialProxies: [],
       });
-
-      // ── NOW take the homepage viewport screenshot ──
-      // Banner has been dismissed (or was never there), page shows clean content
-      console.log('[Crawler] Taking homepage screenshot (post-consent)');
-      homepageResult.screenshotPath = await takeScreenshot(homePage, audit.id, 'homepage');
-
-      await homePage.close();
-    } catch (consentErr) {
-      console.error('[Crawler] Consent/screenshot failed:', consentErr);
-      // If consent handling failed, still take a screenshot via a quick page open
-      if (!homepageResult.screenshotPath) {
-        try {
-          const fallbackPage = await context.newPage();
-          await fallbackPage.goto(audit.website_url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-          await fallbackPage.waitForTimeout(2000);
-          homepageResult.screenshotPath = await takeScreenshot(fallbackPage, audit.id, 'homepage');
-          await fallbackPage.close();
-        } catch { /* no screenshot — that's ok */ }
-      }
     }
 
-    // Save homepage result (with the post-consent screenshot)
-    results.push(homepageResult);
-    saveCrawlResult(audit.id, homepageResult);
+    // Save homepage result (all data is post-consent)
+    results.push(homepageResult.homepage);
+    saveCrawlResult(audit.id, homepageResult.homepage);
 
     // ── Step 3: Discover pages from homepage links ──
     // We need the homepage page object for link extraction, but crawlPage

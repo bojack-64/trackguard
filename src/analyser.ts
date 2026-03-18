@@ -89,6 +89,11 @@ When analysing consent data, pay special attention to:
 - Whether all GA4 consent mode v2 parameters are implemented (ad_storage, analytics_storage, ad_user_data, ad_personalization)
 - Whether tags that should be gated behind consent are actually gated
 
+IMPORTANT consent scenarios to handle correctly:
+- If the consent before/after states show "—" or null/undefined values rather than "granted"/"denied", this means the CMP is NOT implementing Google Consent Mode v2 parameters. This is common with Shopify's built-in privacy banner and some simpler CMPs. Report this as: "The consent banner is present but does not configure Google Consent Mode v2 parameters (ad_storage, analytics_storage, etc.). This means Google cannot honour user consent preferences for data collection. Recommend implementing Consent Mode v2 through GTM or a compatible CMP."
+- Do NOT display "—" or "?" in the consent assessment column. Use clear language: "Not configured" if the parameter was never set, or "No default denied state" if consent defaults were not detected.
+- If a consent banner is detected but NO consent state was readable before or after clicking accept, this is a medium-severity issue (CMP present but not integrated with analytics), not a critical one.
+
 When analysing GA4 configuration, look for:
 - Multiple measurement IDs (could indicate duplicate tracking)
 - Multiple GTM containers (check if intentional or problematic)

@@ -265,17 +265,23 @@ function renderConsentSection(consent: ConsentResult): string {
               } else if (before === 'granted' && after === 'granted') {
                 status = '⚠ No default deny';
                 statusClass = 'consent-cell-warn';
-              } else if (before === '—' && after === '—') {
-                status = '— Not set';
+              } else if ((before === '—' || before === 'undefined' || !before) && (after === '—' || after === 'undefined' || !after)) {
+                status = 'Not configured';
                 statusClass = 'consent-cell-missing';
+              } else if ((before === '—' || before === 'undefined' || !before) && after === 'granted') {
+                status = '⚠ No default denied state';
+                statusClass = 'consent-cell-warn';
+              } else if ((before === '—' || before === 'undefined' || !before) && after === 'denied') {
+                status = '⚠ Not configured';
+                statusClass = 'consent-cell-warn';
               } else {
-                status = '?';
-                statusClass = '';
+                status = 'Inconclusive';
+                statusClass = 'consent-cell-missing';
               }
               return `<tr>
                 <td><code>${escHtml(key)}</code></td>
-                <td class="${before === 'denied' ? 'consent-cell-denied' : before === 'granted' ? 'consent-cell-granted' : ''}">${escHtml(before)}</td>
-                <td class="${after === 'denied' ? 'consent-cell-denied' : after === 'granted' ? 'consent-cell-granted' : ''}">${escHtml(after)}</td>
+                <td class="${before === 'denied' ? 'consent-cell-denied' : before === 'granted' ? 'consent-cell-granted' : 'consent-cell-missing'}">${(!before || before === '—' || before === 'undefined') ? 'Not set' : escHtml(before)}</td>
+                <td class="${after === 'denied' ? 'consent-cell-denied' : after === 'granted' ? 'consent-cell-granted' : 'consent-cell-missing'}">${(!after || after === '—' || after === 'undefined') ? 'Not set' : escHtml(after)}</td>
                 <td class="${statusClass}">${status}</td>
               </tr>`;
             }).join('')}
