@@ -75,7 +75,21 @@ IMPORTANT ANALYSIS GUIDELINES — read carefully:
 
 7. MISSING CONSENT BANNER WITH ACTIVE CONSENT STATE: If a CMP is detected in the dataLayer (e.g. OneTrust consent events, Cookiebot config) but no visible consent banner was shown, this is likely because the CMP is configured to auto-apply consent defaults without showing a banner in certain jurisdictions (e.g. a deny-all default in regions where that's sufficient). Do NOT flag this as "Missing consent banner" or "CMP not working." Instead note it as an observation: "CMP ([name]) detected in dataLayer with consent defaults applied, but no visible banner was shown during the crawl. This is likely jurisdiction-based banner suppression." Only flag it as an issue if consent defaults are set to granted (which could indicate misconfigured implied consent).
 
-9. ZERO-DATA SITES: If the crawl captured zero GA4 requests, zero GTM containers, AND zero dataLayer events across ALL pages, this site has no detectable Google analytics tracking. In this case:
+9. TERMINOLOGY — DO NOT CONFUSE THESE:
+   - GTM container IDs always start with "GTM-" (e.g. GTM-P32JX6). These are Google Tag Manager containers.
+   - GA4 measurement IDs always start with "G-" (e.g. G-KB1068K0E6). These are Google Analytics 4 properties.
+   - Google Ads conversion IDs start with "AW-" (e.g. AW-935878905). These are advertising conversion tags.
+   Never call a G- ID a "GTM container" or a GTM- ID a "measurement ID." Use the correct terminology based on the prefix.
+
+10. CONVERSION EVENTS CANNOT BE VERIFIED BY EXTERNAL CRAWL: Events like purchase, add_to_cart, begin_checkout, sign_up, and generate_lead require real user interactions (adding items, completing checkout, filling forms) that an automated crawl cannot perform. Their absence from crawl data is EXPECTED and must NEVER be flagged as an issue — not even as LOW severity. If the intake form lists conversion goals, note in LIMITATIONS ONLY: "Conversion events (purchase, add_to_cart, etc.) require user interaction that this automated crawl cannot trigger. Their presence could not be verified." Do NOT create an issue card for missing conversion events.
+
+11. SHOPIFY EMPTY CUSTOMER DATA: On Shopify sites, the dataLayer always contains customer objects with empty fields (id, lastOrder, orderCount, totalSpent, tags) for unauthenticated visitors. This is standard Shopify behaviour and must NOT be flagged as an issue. These fields only populate for logged-in customers, which an automated crawl cannot simulate.
+
+12. NO CONTRADICTIONS: NEVER flag the same thing as both an issue AND a limitation. If something is a tool limitation (e.g. the crawl cannot verify conversion events, or cannot parse certain request formats), it belongs ONLY in the limitations section. If something is a genuine client-side issue (e.g. missing consent banner), it belongs ONLY in the issues section. Before finalising your response, review every issue and every limitation — if any issue references something also mentioned as a limitation, remove it from whichever section is less appropriate.
+
+13. GA4 SESSION/CONFIG PINGS: GA4 requests with event name "session_config" are initial session establishment pings sent by the GA4 library. They confirm GA4 is loading and connecting to Google servers, but they don't carry an event name by design. Count them as evidence that GA4 is active, but do not flag the lack of event name as an issue. Similarly, "conversion_ping" events are Google Ads CCM server-side pings — treat these as evidence of active ad conversion tracking.
+
+14. ZERO-DATA SITES: If the crawl captured zero GA4 requests, zero GTM containers, AND zero dataLayer events across ALL pages, this site has no detectable Google analytics tracking. In this case:
    - Set the health score to 0
    - Do NOT generate positive findings. Do not manufacture positives like "no privacy violations" or "clean slate" — the absence of tracking is not a positive outcome for a business that needs analytics
    - Issue a single critical finding: "No analytics tracking infrastructure detected"
@@ -182,7 +196,10 @@ function parseGA4CollectUrl(url: string): {
   }
 
   return {
-    event_name: params['en'] || 'unknown',
+    event_name: params['en']
+      || (isCCM && params['ae'] === 'g' ? 'conversion_ping' : '')
+      || (requestType === 'ga4' && !params['en'] ? 'session_config' : '')
+      || 'unclassified',
     measurement_id: params['tid'] || '',
     page_location: params['dl'] || '',
     gcs: params['gcs'] || '',
@@ -393,8 +410,8 @@ ${consentData.postConsentState
   : 'No post-consent state detected'}
 
 ### GA4 Requests That Fired After Consent Was Granted
-${consentData.postConsentGA4Requests.length > 0
-  ? consentData.postConsentGA4Requests
+${(consentData.postConsentGA4Requests || []).length > 0
+  ? (consentData.postConsentGA4Requests || [])
       .map(r => {
         const parsed = parseGA4CollectUrl(r.url || '');
         return `- Event: ${parsed.event_name} | Measurement ID: ${r.measurement_id || parsed.measurement_id || 'unknown'} | GCS: ${parsed.gcs || 'not present'} | Page: ${parsed.page_location || 'unknown'}`;
@@ -403,8 +420,8 @@ ${consentData.postConsentGA4Requests.length > 0
   : 'No GA4 requests fired after consent was granted'}
 
 ### Post-Consent DataLayer Events
-${consentData.postConsentDataLayer.length > 0
-  ? consentData.postConsentDataLayer
+${(consentData.postConsentDataLayer || []).length > 0
+  ? (consentData.postConsentDataLayer || [])
       .slice(0, 15)
       .map(d => `- ${JSON.stringify(d.data).substring(0, 300)}`)
       .join('\n')
@@ -434,11 +451,15 @@ The crawl detected consent state values in the dataLayer (see above) but NO visi
     // Enriched GA4 request parsing
     const parsedGA4 = ga4Reqs.map((r: any) => parseGA4CollectUrl(r.url || ''));
 
-    // Format load time — if it's >= 29000ms, it's likely a networkidle timeout, not a real measurement
-    const loadMs = page.page_load_ms || 0;
-    const loadTimeDisplay = loadMs >= 29000
-      ? `${(loadMs / 1000).toFixed(1)}s+ (networkidle timeout — page was still loading)`
-      : `${loadMs}ms`;
+    // Use DOMContentLoaded time (dcl_ms) if available, fall back to page_load_ms
+    const dclMs = page.dom_content_loaded_ms || 0;
+    const loadMs = dclMs > 0 ? dclMs : (page.page_load_ms || 0);
+    const isTimeout = (page.page_load_ms || 0) >= 29000;
+    const loadTimeDisplay = loadMs === 0 || loadMs < 100
+      ? 'Failed to load'
+      : isTimeout && dclMs === 0
+        ? `${((page.page_load_ms || 0) / 1000).toFixed(1)}s+ (networkidle timeout — page was still loading)`
+        : `${loadMs}ms (DOMContentLoaded)`;
 
     sections.push(`### Page: ${page.page_type} — ${page.page_url}
 - Load time: ${loadTimeDisplay}

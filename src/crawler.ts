@@ -1265,6 +1265,22 @@ async function dismissInterstitials(page: Page): Promise<boolean> {
     '[class*="age-gate"] button',
     '[class*="age-verify"] button',
 
+    // Shopify-specific popups (country selector, newsletter, shipping notice)
+    '[class*="country-selector"] [class*="close"]',
+    '[class*="country-selector"] button[class*="dismiss"]',
+    '[class*="shipping"] [class*="close"]',
+    '[class*="announcement"] [class*="close"]',
+    'form[class*="newsletter"] [class*="close"]',
+    '[class*="newsletter-popup"] [class*="close"]',
+    '[class*="popup-modal"] [class*="close"]',
+    '.shopify-section-popup [class*="close"]',
+    // Generic "Where do you want to ship?" / locale selectors
+    '[class*="locale-selector"] [class*="close"]',
+    '[class*="locale"] button[class*="confirm"]',
+    '[class*="geo"] [class*="close"]',
+    '[class*="geo-modal"] button',
+    'button[class*="stay-on-site" i]',
+
     // "Continue" / "Accept" / "Got it" buttons on interstitials
     '[class*="interstitial"] button',
     '[class*="splash"] button',

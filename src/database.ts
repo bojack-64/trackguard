@@ -193,6 +193,7 @@ export interface CrawlPageRow {
   console_errors: string | null;
   screenshot_path: string | null;
   page_load_ms: number | null;
+  dom_content_loaded_ms: number | null;
   raw_network_log: string | null;
   potential_proxies: string | null;
   crawled_at: string;
