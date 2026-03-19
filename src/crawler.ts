@@ -585,20 +585,23 @@ export async function crawlSite(audit: AuditRow): Promise<{ pages: PageCrawlResu
 
     consentResult = homepageResult.consent;
 
-    // Save consent data as a separate row
+    // Save consent data as a separate row — store the FULL ConsentResult in consent_state
+    // so it can be reconstructed later without the in-memory cache
     if (consentResult) {
-      saveCrawlResult(audit.id, {
-        pageUrl: audit.website_url,
-        pageType: 'consent_check',
-        dataLayerEvents: consentResult.postConsentDataLayer,
-        ga4Requests: consentResult.postConsentGA4Requests,
-        gtmRequests: [],
-        consoleErrors: consentResult.errors,
-        screenshotPath: consentResult.bannerScreenshot,
-        pageLoadMs: 0,
-        domContentLoadedMs: 0,
-        rawNetworkLog: [],
-        potentialProxies: [],
+      insertCrawlPage({
+        audit_id: audit.id,
+        page_url: audit.website_url,
+        page_type: 'consent_check',
+        datalayer_events: JSON.stringify(consentResult.postConsentDataLayer),
+        ga4_requests: JSON.stringify(consentResult.postConsentGA4Requests),
+        gtm_requests: JSON.stringify([]),
+        console_errors: JSON.stringify(consentResult.errors),
+        screenshot_path: consentResult.bannerScreenshot || undefined,
+        page_load_ms: 0,
+        dom_content_loaded_ms: 0,
+        raw_network_log: JSON.stringify([]),
+        potential_proxies: JSON.stringify([]),
+        consent_state: JSON.stringify(consentResult),
       });
     }
 
@@ -1184,7 +1187,30 @@ async function handleConsent(
       if (result.bannerFound) break; // Stop checking other CMPs
     }
 
-    // If no named CMP banner found, check for generic consent elements
+    // If banner was found via generic selectors, check for known CMP scripts/objects
+    // to upgrade the CMP name (e.g. OneTrust on SPAs where banner SDK renders late)
+    if (result.bannerFound && result.cmpDetected === 'generic') {
+      const detectedCmp = await page.evaluate(`
+        (function() {
+          // OneTrust: check for SDK object or CDN scripts
+          if (typeof window.OneTrust !== 'undefined' || typeof window.OptanonWrapper !== 'undefined') return 'onetrust';
+          var scripts = document.querySelectorAll('script[src]');
+          for (var i = 0; i < scripts.length; i++) {
+            var src = scripts[i].src.toLowerCase();
+            if (src.includes('cookielaw.org') || src.includes('onetrust.com') || src.includes('optanon')) return 'onetrust';
+            if (src.includes('cookiebot.com') || src.includes('cybot')) return 'cookiebot';
+            if (src.includes('quantcast.com') || src.includes('quantcast.mgr')) return 'quantcast';
+          }
+          return null;
+        })()
+      `) as string | null;
+      if (detectedCmp) {
+        console.log(`[Consent] Upgrading CMP from "generic" to "${detectedCmp}" (detected via scripts/objects)`);
+        result.cmpDetected = detectedCmp;
+      }
+    }
+
+    // If no banner found at all
     if (!result.bannerFound) {
       console.log('[Consent] No known CMP banner detected');
     }

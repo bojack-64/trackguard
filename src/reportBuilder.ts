@@ -6,6 +6,7 @@
 import { AuditRow, getCrawlPages } from './database';
 import { AnalysisResult, Scorecard, AnalysisIssue } from './analyser';
 import { ConsentResult } from './crawler';
+import { ScorecardResult, CheckResult, CheckCategory } from './checks';
 import path from 'path';
 import fs from 'fs';
 
@@ -850,4 +851,440 @@ function safeParseJSON(str: string | null, fallback: any): any {
   } catch {
     return fallback;
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW: Deterministic Scorecard Report Builder
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const CATEGORY_ORDER: CheckCategory[] = [
+  'GA4 Detection',
+  'GTM Detection',
+  'Consent & Privacy',
+  'Ecommerce Events',
+  'Tag Health',
+  'Page Coverage',
+];
+
+const STATUS_ICONS: Record<string, string> = {
+  pass: '&#10003;',  // ✓
+  fail: '&#10007;',  // ✗
+  warn: '&#9888;',   // ⚠
+  info: '&#8505;',   // ℹ
+};
+
+/**
+ * Generate a compact scorecard HTML report from deterministic check results.
+ * Self-contained HTML with inline CSS. No AI, no narrative.
+ */
+/** Deduplicate crawl_pages rows by URL. Keep the row with the higher dataLayer count. */
+function deduplicateCrawlPages(pages: any[]): any[] {
+  const byUrl = new Map<string, any>();
+  for (const p of pages) {
+    const existing = byUrl.get(p.page_url);
+    if (!existing) {
+      byUrl.set(p.page_url, p);
+    } else {
+      const existingDL = safeParseJSON(existing.datalayer_events, []).length;
+      const currentDL = safeParseJSON(p.datalayer_events, []).length;
+      if (currentDL > existingDL) {
+        byUrl.set(p.page_url, p);
+      }
+    }
+  }
+  return Array.from(byUrl.values());
+}
+
+export function buildScorecardReport(
+  audit: AuditRow,
+  scorecard: ScorecardResult,
+  consentData: ConsentResult | null
+): string {
+  const crawlPages = deduplicateCrawlPages(getCrawlPages(audit.id).filter(p => p.page_type !== 'consent_check'));
+  const auditDate = new Date(audit.created_at).toLocaleDateString('en-IE', {
+    day: 'numeric', month: 'long', year: 'numeric',
+  });
+
+  // Group checks by category (excluding overall_score)
+  const checksByCategory = new Map<CheckCategory, CheckResult[]>();
+  for (const cat of CATEGORY_ORDER) {
+    checksByCategory.set(cat, []);
+  }
+  for (const check of scorecard.checks) {
+    if (check.id === 'overall_score') continue;
+    const list = checksByCategory.get(check.category as CheckCategory);
+    if (list) list.push(check);
+  }
+
+  // Get homepage screenshot
+  const homepageCrawl = crawlPages.find(p => p.page_type === 'homepage');
+  const homepageScreenshot = homepageCrawl?.screenshot_path || null;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tracking Health Check — ${escHtml(audit.website_url)} | TrackGuard</title>
+  <style>${scorecardCSS()}</style>
+</head>
+<body>
+  <div class="report">
+    ${renderScorecardHeader(audit, auditDate, scorecard)}
+    ${renderCheckCategories(checksByCategory)}
+    ${homepageScreenshot ? renderScorecardScreenshot(homepageScreenshot, 'Homepage at time of audit') : ''}
+    ${renderScorecardPagesTable(crawlPages)}
+    ${renderScorecardFooter(audit)}
+  </div>
+  <script>${scorecardJS()}</script>
+</body>
+</html>`;
+}
+
+function renderScorecardHeader(audit: AuditRow, auditDate: string, sc: ScorecardResult): string {
+  const scoreColor = sc.score >= 80 ? 'score-green' : sc.score >= 50 ? 'score-amber' : 'score-red';
+
+  return `
+    <header class="report-header">
+      <div class="header-top">
+        <div class="brand">Track<span class="brand-accent">Guard</span></div>
+        <h1>Tracking Health Check</h1>
+      </div>
+      <div class="header-meta">
+        <div class="meta-item"><span class="meta-label">Website</span><span class="meta-value">${escHtml(audit.website_url)}</span></div>
+        <div class="meta-item"><span class="meta-label">Company</span><span class="meta-value">${escHtml(audit.company_name)}</span></div>
+        <div class="meta-item"><span class="meta-label">Date</span><span class="meta-value">${auditDate}</span></div>
+        <div class="meta-item"><span class="meta-label">Reference</span><span class="meta-value">${escHtml(audit.reference_id)}</span></div>
+      </div>
+    </header>
+    <section class="score-section">
+      <div class="score-circle ${scoreColor}">
+        <div class="score-number">${sc.score}</div>
+        <div class="score-label">/ 100</div>
+      </div>
+      <div class="score-summary">
+        <div class="score-counts">
+          <span class="count-badge count-pass">${sc.passCount} passed</span>
+          <span class="count-badge count-warn">${sc.warnCount} warning${sc.warnCount !== 1 ? 's' : ''}</span>
+          <span class="count-badge count-fail">${sc.failCount} failure${sc.failCount !== 1 ? 's' : ''}</span>
+          <span class="count-badge count-info">${sc.infoCount} info</span>
+        </div>
+      </div>
+    </section>`;
+}
+
+function renderCheckCategories(checksByCategory: Map<CheckCategory, CheckResult[]>): string {
+  let html = '<section class="checks-section">';
+
+  for (const [category, checks] of checksByCategory) {
+    if (checks.length === 0) continue;
+
+    html += `
+      <div class="category-group">
+        <h2 class="category-title">${escHtml(category)}</h2>
+        <div class="checks-list">`;
+
+    for (const check of checks) {
+      const hasDetails = check.details && Object.keys(check.details).length > 0;
+      html += `
+          <div class="check-row check-${check.status}${hasDetails ? ' expandable' : ''}"${hasDetails ? ' onclick="toggleDetails(this)"' : ''}>
+            <div class="check-main">
+              <span class="status-icon status-${check.status}">${STATUS_ICONS[check.status]}</span>
+              <span class="check-name">${escHtml(check.name)}</span>
+              <span class="check-summary">${escHtml(check.summary)}</span>
+              ${hasDetails ? '<span class="expand-arrow">&#9660;</span>' : ''}
+            </div>
+            ${hasDetails ? `<div class="check-details">${renderCheckDetails(check)}</div>` : ''}
+          </div>`;
+    }
+
+    html += `
+        </div>
+      </div>`;
+  }
+
+  html += '</section>';
+  return html;
+}
+
+function renderCheckDetails(check: CheckResult): string {
+  if (!check.details) return '';
+
+  const d = check.details;
+  const parts: string[] = [];
+
+  // Render known detail types nicely
+  if (d.measurement_ids) {
+    parts.push(`<div class="detail-item"><strong>Measurement IDs:</strong> ${(d.measurement_ids as string[]).map(id => `<code>${escHtml(id)}</code>`).join(', ')}</div>`);
+  }
+  if (d.container_ids) {
+    parts.push(`<div class="detail-item"><strong>Container IDs:</strong> ${(d.container_ids as string[]).map(id => `<code>${escHtml(id)}</code>`).join(', ')}</div>`);
+  }
+  if (d.ads_ids) {
+    parts.push(`<div class="detail-item"><strong>Ads IDs:</strong> ${(d.ads_ids as string[]).map(id => `<code>${escHtml(id)}</code>`).join(', ')}</div>`);
+  }
+  if (d.tags) {
+    parts.push(`<div class="detail-item"><strong>Tags:</strong> ${(d.tags as string[]).join(', ')}</div>`);
+  }
+  if (d.missing_pages) {
+    parts.push(`<div class="detail-item"><strong>Missing pages:</strong><ul>${(d.missing_pages as any[]).map(p => `<li>${escHtml(p.page_type || 'unknown')}: <code>${escHtml(p.url)}</code></li>`).join('')}</ul></div>`);
+  }
+  if (d.affected_pages) {
+    parts.push(`<div class="detail-item"><strong>Affected pages:</strong><ul>${(d.affected_pages as any[]).map(p => `<li>${escHtml(p.page_type || 'unknown')}: <code>${escHtml(p.url)}</code></li>`).join('')}</ul></div>`);
+  }
+  if (d.pages_with_duplicates) {
+    parts.push(`<div class="detail-item"><strong>Pages with duplicates:</strong><ul>${(d.pages_with_duplicates as any[]).map(p => `<li>${escHtml(p.label)}: ${p.ids.map((id: string) => `<code>${escHtml(id)}</code>`).join(', ')}</li>`).join('')}</ul></div>`);
+  }
+  if (d.duplicate_pages) {
+    parts.push(`<div class="detail-item"><strong>Duplicate page_view:</strong><ul>${(d.duplicate_pages as any[]).map(p => `<li>${escHtml(p.label)}: ${p.count} page_view events</li>`).join('')}</ul></div>`);
+  }
+  if (d.containers) {
+    const containers = d.containers as Record<string, string[]>;
+    parts.push(`<div class="detail-item"><strong>Containers by page:</strong><ul>${Object.entries(containers).map(([id, pages]) => `<li><code>${escHtml(id)}</code>: ${pages.join(', ')}</li>`).join('')}</ul></div>`);
+  }
+  if (d.changes) {
+    const changes = d.changes as Record<string, { before: string; after: string }>;
+    parts.push(`<div class="detail-item"><strong>Consent changes:</strong><table class="detail-table"><thead><tr><th>Parameter</th><th>Before</th><th>After</th></tr></thead><tbody>${Object.entries(changes).map(([k, v]) => `<tr><td><code>${escHtml(k)}</code></td><td>${escHtml(v.before)}</td><td>${escHtml(v.after)}</td></tr>`).join('')}</tbody></table></div>`);
+  }
+  if (d.defaults) {
+    const defaults = d.defaults as Record<string, string>;
+    if (Object.keys(defaults).length > 0) {
+      parts.push(`<div class="detail-item"><strong>Default consent state:</strong> ${Object.entries(defaults).map(([k, v]) => `${k}=${v}`).join(', ')}</div>`);
+    }
+  }
+  if (d.pre_consent_gcs && (d.pre_consent_gcs as string[]).length > 0) {
+    parts.push(`<div class="detail-item"><strong>Pre-consent GCS values:</strong> ${[...new Set(d.pre_consent_gcs as string[])].map(g => `<code>${escHtml(g)}</code>`).join(', ')}</div>`);
+  }
+  if (d.pre_consent_count) {
+    parts.push(`<div class="detail-item"><strong>Pre-consent GA4 requests:</strong> ${d.pre_consent_count}</div>`);
+  }
+  if (d.pages) {
+    parts.push(`<div class="detail-item"><ul>${(d.pages as any[]).map(p => `<li>${escHtml(p.page_type || 'unknown')}: <code>${escHtml(p.url)}</code></li>`).join('')}</ul></div>`);
+  }
+  if (d.failed_pages) {
+    parts.push(`<div class="detail-item"><strong>Failed:</strong><ul>${(d.failed_pages as any[]).map(p => `<li>${escHtml(p.page_type || 'unknown')}: <code>${escHtml(p.url)}</code></li>`).join('')}</ul></div>`);
+  }
+  if (d.times) {
+    parts.push(`<div class="detail-item"><table class="detail-table"><thead><tr><th>Page</th><th>Load Time</th></tr></thead><tbody>${(d.times as any[]).map(t => `<tr><td>${escHtml(t.page)}</td><td>${escHtml(t.dcl_display)}</td></tr>`).join('')}</tbody></table></div>`);
+  }
+  if (d.pages_with_errors) {
+    parts.push(`<div class="detail-item"><strong>Console errors:</strong><ul>${(d.pages_with_errors as any[]).map(p => `<li>${escHtml(p.page)}: ${p.errors.map((e: string) => `<code>${escHtml(e.substring(0, 120))}</code>`).join(', ')}</li>`).join('')}</ul></div>`);
+  }
+  if (d.events_checked) {
+    parts.push(`<div class="detail-item"><strong>Events checked:</strong><ul>${(d.events_checked as any[]).map(e => `<li>${escHtml(e.event)} on ${escHtml(e.page)}: ${e.present.join(', ')}${e.missing.length > 0 ? ` (missing: ${e.missing.join(', ')})` : ''}</li>`).join('')}</ul></div>`);
+  }
+  if (d.events_with_issues) {
+    parts.push(`<div class="detail-item"><strong>Issues:</strong><ul>${(d.events_with_issues as any[]).map(e => `<li>${escHtml(e.event)} on ${escHtml(e.page)}: missing ${e.missing.join(', ')}</li>`).join('')}</ul></div>`);
+  }
+  if (d.missing) {
+    parts.push(`<div class="detail-item"><strong>Missing on:</strong><ul>${(d.missing as any[]).map(m => `<li><code>${escHtml(m.url)}</code></li>`).join('')}</ul></div>`);
+  }
+
+  return parts.join('');
+}
+
+function renderScorecardScreenshot(screenshotRelPath: string, caption: string): string {
+  const absolutePath = path.join(__dirname, '..', 'public', screenshotRelPath);
+  try {
+    if (fs.existsSync(absolutePath)) {
+      const stat = fs.statSync(absolutePath);
+      if (stat.size < 15000) {
+        return `<section class="screenshot-section"><div class="screenshot-placeholder"><p>Screenshot unavailable — page did not render during crawl.</p></div></section>`;
+      }
+      const imageBuffer = fs.readFileSync(absolutePath);
+      const base64 = imageBuffer.toString('base64');
+      const mimeType = screenshotRelPath.endsWith('.png') ? 'image/png' : 'image/jpeg';
+      return `
+    <section class="screenshot-section">
+      <h2>Homepage Screenshot</h2>
+      <img src="data:${mimeType};base64,${base64}" alt="${escHtml(caption)}" class="screenshot" loading="lazy" />
+    </section>`;
+    }
+  } catch { /* skip */ }
+  return '';
+}
+
+function renderScorecardPagesTable(crawlPages: any[]): string {
+  return `
+    <section class="pages-section">
+      <h2>Pages Audited</h2>
+      <table class="pages-table">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>URL</th>
+            <th>Load Time</th>
+            <th>DataLayer</th>
+            <th>GA4</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${crawlPages.map(p => {
+            const dl = safeParseJSON(p.datalayer_events, []);
+            const ga4 = safeParseJSON(p.ga4_requests, []);
+            const shortUrl = p.page_url.length > 55 ? p.page_url.substring(0, 52) + '…' : p.page_url;
+            const dcl = (p as any).dom_content_loaded_ms || 0;
+            const loadDisplay = dcl > 100 ? `${(dcl / 1000).toFixed(1)}s` : '<span class="text-red">Failed</span>';
+            return `<tr>
+              <td><span class="type-badge">${escHtml(p.page_type)}</span></td>
+              <td class="url-cell"><a href="${escHtml(p.page_url)}" target="_blank" rel="noopener" title="${escHtml(p.page_url)}">${escHtml(shortUrl)}</a></td>
+              <td>${loadDisplay}</td>
+              <td>${dl.length}</td>
+              <td>${ga4.length}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </section>`;
+}
+
+function renderScorecardFooter(audit: AuditRow): string {
+  return `
+    <footer class="report-footer">
+      <p class="disclaimer">This scan captures externally observable tracking behaviour. It cannot access your GA4 property, GTM workspace, or verify server-side configurations. Conversion events requiring user interaction (purchase, add_to_cart) cannot be triggered by automated scans.</p>
+      <div class="footer-brand">
+        <div class="brand brand-sm">Track<span class="brand-accent">Guard</span></div>
+        <p>Report generated ${new Date().toLocaleDateString('en-IE', { day: 'numeric', month: 'long', year: 'numeric' })} · Ref: ${escHtml(audit.reference_id)}</p>
+      </div>
+    </footer>`;
+}
+
+function scorecardJS(): string {
+  return `
+    function toggleDetails(el) {
+      el.classList.toggle('expanded');
+    }
+  `;
+}
+
+function scorecardCSS(): string {
+  return `
+    :root {
+      --navy: #1B2A4A;
+      --navy-light: #2a3f6a;
+      --teal: #2E8B8B;
+      --teal-light: #e6f4f4;
+      --red: #DC3545;
+      --red-bg: #fdf0f0;
+      --orange: #E67E22;
+      --orange-bg: #fef5ec;
+      --amber: #F0AD4E;
+      --amber-bg: #fef9ec;
+      --green: #28A745;
+      --green-bg: #edf8ef;
+      --blue: #3B82F6;
+      --blue-bg: #eff6ff;
+      --gray-50: #f9fafb;
+      --gray-100: #f3f4f6;
+      --gray-200: #e5e7eb;
+      --gray-300: #d1d5db;
+      --gray-500: #6b7280;
+      --gray-700: #374151;
+      --gray-900: #111827;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --mono: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: var(--font); color: var(--gray-900); background: var(--gray-50); line-height: 1.5; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .report { max-width: 900px; margin: 0 auto; background: white; }
+
+    /* Header */
+    .report-header { background: var(--navy); color: white; padding: 32px 40px; }
+    .header-top { margin-bottom: 20px; }
+    .brand { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+    .brand-accent { color: var(--teal); }
+    .brand-sm { font-size: 13px; }
+    .report-header h1 { font-size: 24px; font-weight: 300; }
+    .header-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .meta-label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: rgba(255,255,255,0.5); }
+    .meta-value { font-size: 13px; }
+
+    /* Score section */
+    .score-section { display: flex; align-items: center; gap: 24px; padding: 28px 40px; border-bottom: 1px solid var(--gray-200); }
+    .score-circle { width: 100px; height: 100px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; flex-shrink: 0; }
+    .score-green { background: var(--green-bg); border: 3px solid var(--green); }
+    .score-amber { background: var(--amber-bg); border: 3px solid var(--amber); }
+    .score-red { background: var(--red-bg); border: 3px solid var(--red); }
+    .score-number { font-size: 36px; font-weight: 700; line-height: 1; }
+    .score-green .score-number { color: var(--green); }
+    .score-amber .score-number { color: var(--orange); }
+    .score-red .score-number { color: var(--red); }
+    .score-label { font-size: 11px; color: var(--gray-500); }
+    .score-counts { display: flex; gap: 8px; flex-wrap: wrap; }
+    .count-badge { font-size: 12px; padding: 4px 10px; border-radius: 12px; font-weight: 600; }
+    .count-pass { background: var(--green-bg); color: var(--green); }
+    .count-warn { background: var(--orange-bg); color: var(--orange); }
+    .count-fail { background: var(--red-bg); color: var(--red); }
+    .count-info { background: var(--blue-bg); color: var(--blue); }
+
+    /* Checks */
+    .checks-section { padding: 0 40px 24px; }
+    .category-group { margin-top: 24px; }
+    .category-title { font-size: 15px; font-weight: 700; color: var(--navy); padding-bottom: 8px; border-bottom: 2px solid var(--gray-200); margin-bottom: 0; }
+    .checks-list { }
+    .check-row { border-bottom: 1px solid var(--gray-100); }
+    .check-main { display: flex; align-items: center; gap: 10px; padding: 10px 0; font-size: 13px; }
+    .expandable .check-main { cursor: pointer; }
+    .expandable .check-main:hover { background: var(--gray-50); margin: 0 -8px; padding: 10px 8px; border-radius: 4px; }
+    .status-icon { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; font-weight: 700; }
+    .status-pass { background: var(--green-bg); color: var(--green); }
+    .status-fail { background: var(--red-bg); color: var(--red); }
+    .status-warn { background: var(--orange-bg); color: var(--orange); font-size: 14px; }
+    .status-info { background: var(--blue-bg); color: var(--blue); font-size: 11px; }
+    .check-name { font-weight: 600; color: var(--gray-900); white-space: nowrap; min-width: 180px; }
+    .check-summary { color: var(--gray-500); flex: 1; }
+    .expand-arrow { font-size: 10px; color: var(--gray-300); transition: transform 0.2s; flex-shrink: 0; }
+    .expanded .expand-arrow { transform: rotate(180deg); }
+    .check-details { display: none; padding: 0 0 12px 32px; font-size: 12px; color: var(--gray-700); }
+    .expanded .check-details { display: block; }
+    .detail-item { margin-bottom: 6px; }
+    .detail-item ul { margin: 4px 0 0 16px; }
+    .detail-item li { margin-bottom: 2px; }
+    .detail-item code { font-family: var(--mono); font-size: 11px; background: var(--gray-100); padding: 1px 5px; border-radius: 3px; }
+    .detail-table { border-collapse: collapse; margin: 4px 0; font-size: 12px; }
+    .detail-table th, .detail-table td { padding: 4px 10px; border: 1px solid var(--gray-200); text-align: left; }
+    .detail-table th { background: var(--gray-50); font-weight: 600; }
+
+    /* Screenshot */
+    .screenshot-section { padding: 24px 40px; border-top: 1px solid var(--gray-200); }
+    .screenshot-section h2 { font-size: 15px; color: var(--navy); margin-bottom: 12px; }
+    .screenshot { max-width: 100%; max-height: 500px; object-fit: contain; object-position: top; border: 1px solid var(--gray-200); border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+    .screenshot-placeholder { background: var(--gray-50); border: 2px dashed var(--gray-300); border-radius: 6px; padding: 30px; text-align: center; color: var(--gray-500); font-size: 13px; }
+
+    /* Pages table */
+    .pages-section { padding: 24px 40px; border-top: 1px solid var(--gray-200); }
+    .pages-section h2 { font-size: 15px; color: var(--navy); margin-bottom: 12px; }
+    .pages-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .pages-table th { background: var(--gray-50); padding: 8px 10px; text-align: left; font-weight: 600; color: var(--gray-700); border-bottom: 2px solid var(--gray-200); }
+    .pages-table td { padding: 6px 10px; border-bottom: 1px solid var(--gray-100); }
+    .url-cell { font-family: var(--mono); font-size: 11px; }
+    .url-cell a { color: var(--gray-500); text-decoration: none; }
+    .url-cell a:hover { color: var(--teal); text-decoration: underline; }
+    .type-badge { background: var(--teal-light); color: var(--teal); padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+    .text-red { color: var(--red); }
+
+    /* Footer */
+    .report-footer { padding: 24px 40px; background: var(--gray-50); border-top: 1px solid var(--gray-200); }
+    .disclaimer { font-size: 11px; color: var(--gray-500); line-height: 1.5; margin-bottom: 16px; }
+    .footer-brand { text-align: center; }
+    .footer-brand p { font-size: 11px; color: var(--gray-500); margin-top: 4px; }
+
+    /* Print */
+    @media print {
+      body { background: white; }
+      .report { max-width: none; box-shadow: none; }
+      .category-group { break-inside: avoid; }
+      .check-details { display: block !important; }
+      .expand-arrow { display: none; }
+    }
+
+    /* Mobile */
+    @media (max-width: 640px) {
+      .report-header, .score-section, .checks-section, .pages-section, .screenshot-section, .report-footer { padding-left: 20px; padding-right: 20px; }
+      .score-section { flex-direction: column; text-align: center; }
+      .check-main { flex-wrap: wrap; }
+      .check-name { min-width: auto; }
+      .header-meta { grid-template-columns: 1fr; }
+    }
+  `;
 }
